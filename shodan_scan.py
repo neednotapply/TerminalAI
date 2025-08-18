@@ -1,10 +1,13 @@
 import os
+import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pandas as pd
 import shodan
 
 CSV_PATH = "endpoints.csv"
+CONFIG_PATH = Path(__file__).with_name("config.json")
 SHODAN_QUERIES = [
     'port:11434 "Ollama"'
 ]
@@ -33,6 +36,15 @@ COLUMNS = [
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def load_api_key():
+    try:
+        with CONFIG_PATH.open() as f:
+            key = json.load(f).get("SHODAN_API_KEY")
+    except (OSError, json.JSONDecodeError):
+        key = None
+    return key or os.getenv("SHODAN_API_KEY")
 
 
 def update_existing(api, df):
@@ -130,9 +142,11 @@ def find_new(api, df):
 
 
 def main():
-    key = os.getenv("SHODAN_API_KEY")
+    key = load_api_key()
     if not key:
-        raise RuntimeError("SHODAN_API_KEY environment variable not set")
+        raise RuntimeError(
+            "SHODAN_API_KEY not provided in config.json or environment variable"
+        )
     api = shodan.Shodan(key)
     try:
         df = pd.read_csv(CSV_PATH, keep_default_na=False)

@@ -10,10 +10,19 @@ keep `endpoints.csv` up to date. It performs two tasks:
    single batched query per port.
 2. Search Shodan for additional public Ollama instances and append them.
 
-Set your API key in the environment and run the script:
+Create a `config.json` next to `shodan_scan.py` with your API key. A
+`config.example.json` template is provided:
+
+```json
+{
+  "SHODAN_API_KEY": "your_key_here"
+}
+```
+
+Alternatively, set the `SHODAN_API_KEY` environment variable. The file takes
+precedence over the environment variable if both are present. Run the script:
 
 ```bash
-export SHODAN_API_KEY=your_key_here
 python shodan_scan.py
 ```
 
