@@ -59,7 +59,7 @@ def load_api_key():
     return key
 
 
-def update_existing(api, df):
+def update_existing(api, df, batch_size):
     if df.empty:
         return df
 
@@ -72,16 +72,19 @@ def update_existing(api, df):
     details = {}
     errors = {}
     for port, ips in grouped.items():
-        ip_query = " OR ".join(f"ip:{ip}" for ip in ips)
-        query = f"port:{port} ({ip_query})"
-        try:
-            results = api.search(query, limit=len(ips)).get("matches", [])
-            for r in results:
-                key = (r.get("ip_str"), r.get("port"))
-                details[key] = r
-        except shodan.APIError as e:
-            for ip in ips:
-                errors[(ip, port)] = str(e)
+        ip_list = list(ips)
+        for i in range(0, len(ip_list), batch_size):
+            chunk = ip_list[i : i + batch_size]
+            ip_query = " OR ".join(f"ip:{ip}" for ip in chunk)
+            query = f"port:{port} ({ip_query})"
+            try:
+                results = api.search(query, limit=batch_size).get("matches", [])
+                for r in results:
+                    key = (r.get("ip_str"), r.get("port"))
+                    details[key] = r
+            except shodan.APIError as e:
+                for ip in chunk:
+                    errors[(ip, port)] = str(e)
 
     now = utc_now()
     for idx, row in df.iterrows():
@@ -171,6 +174,12 @@ def main():
         default=100,
         help="Maximum results to fetch per Shodan query",
     )
+    parser.add_argument(
+        "--existing-limit",
+        type=int,
+        default=100,
+        help="Maximum endpoints to verify per query when checking existing entries",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -193,7 +202,7 @@ def main():
             df[col] = ""
 
     logging.info("Updating existing endpoints")
-    df = update_existing(api, df)
+    df = update_existing(api, df, args.existing_limit)
     logging.info("Finished updating existing endpoints")
 
     logging.info("Searching for new endpoints")
