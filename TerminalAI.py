@@ -21,7 +21,7 @@ YELLOW = "\033[93m"
 RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
-AI_COLOR = "\033[32;40m"
+AI_COLOR = "\033[32m"
 
 SERVER_URL = ""
 selected_server = None
@@ -119,10 +119,10 @@ def display_connecting_box():
     print("\033[?25l", end='')
     os.system("cls" if os.name=="nt" else "clear")
     for i in range(h):
-        print(f"\033[{y+i};{x}H\033[40m{' '*w}{RESET}")
+        print(f"\033[{y+i};{x}H{' '*w}{RESET}")
     msg="CONNECTING TO SERVER"
     mx = x + (w-len(msg))//2; my = y + h//2
-    print(f"\033[{my};{mx}H\033[1;32;40m",end='')
+    print(f"\033[{my};{mx}H\033[1;32m",end='')
     for char in msg:
         print(char, end='', flush=True)
         time.sleep(0.08)

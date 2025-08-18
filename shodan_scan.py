@@ -1,5 +1,7 @@
 import os
 import json
+import logging
+import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -39,12 +41,22 @@ def utc_now():
 
 
 def load_api_key():
+    logging.info("Loading Shodan API key")
     try:
         with CONFIG_PATH.open() as f:
             key = json.load(f).get("SHODAN_API_KEY")
+            if key:
+                logging.info("Loaded API key from config file")
     except (OSError, json.JSONDecodeError):
+        logging.info("Failed to load API key from config file")
         key = None
-    return key or os.getenv("SHODAN_API_KEY")
+    if not key:
+        key = os.getenv("SHODAN_API_KEY")
+        if key:
+            logging.info("Loaded API key from environment variable")
+    if not key:
+        logging.info("Shodan API key not found")
+    return key
 
 
 def update_existing(api, df):
@@ -100,14 +112,17 @@ def update_existing(api, df):
     return df
 
 
-def find_new(api, df):
+def find_new(api, df, limit):
     existing = set(zip(df["ip"], df["port"]))
     new_rows = []
     for query in SHODAN_QUERIES:
+        logging.info(f"Executing Shodan query: {query} (limit {limit})")
         try:
-            results = api.search(query).get("matches", [])
-        except shodan.APIError:
+            results = api.search(query, limit=limit).get("matches", [])
+        except shodan.APIError as e:
+            logging.info(f"Shodan query failed: {e}")
             continue
+        count = 0
         for r in results:
             ip = r.get("ip_str")
             port = r.get("port")
@@ -136,12 +151,33 @@ def find_new(api, df):
                 "longitude": location.get("longitude", ""),
             })
             existing.add((ip, str(port)))
+            count += 1
+        logging.info(f"Processed {count} results for query: {query}")
     if new_rows:
         df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
     return df
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Keep endpoints.csv up to date using the Shodan API"
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Enable debug logging"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum results to fetch per Shodan query",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s:%(message)s",
+    )
+
     key = load_api_key()
     if not key:
         raise RuntimeError(
@@ -155,8 +191,15 @@ def main():
     for col in COLUMNS:
         if col not in df.columns:
             df[col] = ""
+
+    logging.info("Updating existing endpoints")
     df = update_existing(api, df)
-    df = find_new(api, df)
+    logging.info("Finished updating existing endpoints")
+
+    logging.info("Searching for new endpoints")
+    df = find_new(api, df, args.limit)
+    logging.info("Finished searching for new endpoints")
+
     df = df[COLUMNS]
     df.to_csv(CSV_PATH, index=False)
 

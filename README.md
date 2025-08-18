@@ -26,6 +26,21 @@ precedence over the environment variable if both are present. Run the script:
 python shodan_scan.py
 ```
 
+The script uses Python's built-in logging module to report its progress. By
+default it logs informational messages; pass `--verbose` to enable debug level
+output:
+
+```bash
+python shodan_scan.py --verbose
+```
+
+To control API usage, results from each Shodan query are limited to 100 entries by default.
+Use `--limit` to change this value:
+
+```bash
+python shodan_scan.py --limit 50
+```
+
 The script requires the `shodan` and `pandas` packages.  It also enriches each
 entry with metadata provided by Shodan such as hostnames, organisation, ISP and
 geolocation (city, region, country and coordinates) so the CSV remains as
