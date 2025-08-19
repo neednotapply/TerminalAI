@@ -38,11 +38,15 @@ def api_headers():
 def country_flag(name):
     if not name:
         return ""
-    try:
-        code = pycountry.countries.lookup(name).alpha_2
-    except Exception:
+    code = name.strip().upper()
+    if len(code) != 2:
+        try:
+            code = pycountry.countries.lookup(code).alpha_2.upper()
+        except Exception:
+            return ""
+    if len(code) != 2 or not code.isalpha():
         return ""
-    return "".join(chr(ord(c) + 127397) for c in code.upper())
+    return "".join(chr(ord(c) + 127397) for c in code)
 
 def load_servers():
     try:
