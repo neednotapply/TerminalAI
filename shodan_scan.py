@@ -40,6 +40,18 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def build_name(ip, port, city, org):
+    org = org or ""
+    org = (org[:17] + "...") if len(org) > 20 else org
+    parts = ["Shodan"]
+    if city:
+        parts.append(city)
+    if org:
+        parts.append(org)
+    parts.append(f"({ip}:{port})")
+    return " ".join(parts)
+
+
 def load_api_key():
     logging.info("Loading Shodan API key")
     try:
@@ -101,13 +113,16 @@ def update_existing(api, df, batch_size):
             df.at[idx, "verified"] = 1
             df.at[idx, "verification_date"] = now
             df.at[idx, "hostnames"] = ";".join(r.get("hostnames", []))
-            df.at[idx, "org"] = r.get("org", "")
+            org = r.get("org", "")
+            df.at[idx, "org"] = org
             df.at[idx, "isp"] = r.get("isp", "")
-            df.at[idx, "city"] = location.get("city", "")
+            city = location.get("city", "")
+            df.at[idx, "city"] = city
             df.at[idx, "region"] = location.get("region_code") or location.get("region_name", "")
             df.at[idx, "country"] = location.get("country_name", "")
             df.at[idx, "latitude"] = location.get("latitude", "")
             df.at[idx, "longitude"] = location.get("longitude", "")
+            df.at[idx, "id"] = build_name(ip, port, city, org)
         else:
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = errors.get(key, "port closed")
@@ -133,8 +148,10 @@ def find_new(api, df, limit):
                 continue
             location = r.get("location", {})
             scan_date = r.get("timestamp", utc_now())
+            org = r.get("org", "")
+            city = location.get("city", "")
             new_rows.append({
-                "id": f"Shodan {ip}:{port}",
+                "id": build_name(ip, port, city, org),
                 "ip": ip,
                 "port": port,
                 "scan_date": scan_date,
@@ -145,9 +162,9 @@ def find_new(api, df, limit):
                 "last_check_date": scan_date,
                 "api_type": "ollama",
                 "hostnames": ";".join(r.get("hostnames", [])),
-                "org": r.get("org", ""),
+                "org": org,
                 "isp": r.get("isp", ""),
-                "city": location.get("city", ""),
+                "city": city,
                 "region": location.get("region_code") or location.get("region_name", ""),
                 "country": location.get("country_name", ""),
                 "latitude": location.get("latitude", ""),
