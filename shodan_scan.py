@@ -11,7 +11,7 @@ import shodan
 CSV_PATH = "endpoints.csv"
 CONFIG_PATH = Path(__file__).with_name("config.json")
 SHODAN_QUERIES = [
-    'port:11434 "Ollama"'
+    'http.html:"Ollama is running" port:11434'
 ]
 
 COLUMNS = [
