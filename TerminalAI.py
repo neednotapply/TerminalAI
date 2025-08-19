@@ -7,6 +7,7 @@ import sys
 import shutil
 import pandas as pd
 import select
+import pycountry
 
 if os.name == "nt":
     import msvcrt
@@ -27,10 +28,21 @@ SERVER_URL = ""
 selected_server = None
 selected_api = None
 IDLE_TIMEOUT = 30
+REQUEST_TIMEOUT = 15
 CSV_PATH = "endpoints.csv"
 
 def api_headers():
     return {"Content-Type": "application/json"}
+
+
+def country_flag(name):
+    if not name:
+        return ""
+    try:
+        code = pycountry.countries.lookup(name).alpha_2
+    except Exception:
+        return ""
+    return "".join(chr(ord(c) + 127397) for c in code.upper())
 
 def load_servers():
     try:
@@ -50,7 +62,8 @@ def load_servers():
     for ip, group in df.groupby("ip"):
         apis = {row["api_type"]: row["port"] for _, row in group.iterrows()}
         nickname = group.iloc[0]["nickname"]
-        servers.append({"ip": ip, "nickname": nickname, "apis": apis})
+        country = group.iloc[0].get("country", "")
+        servers.append({"ip": ip, "nickname": nickname, "apis": apis, "country": country})
     return servers
 
 def persist_nickname(server, new_nick):
@@ -67,7 +80,8 @@ def persist_nickname(server, new_nick):
 def select_server(servers):
     print(f"{CYAN}Available Servers:{RESET}")
     for i, s in enumerate(servers, 1):
-        print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}){RESET}")
+        flag = country_flag(s.get("country"))
+        print(f"{GREEN}{i}. {flag} {s['nickname']} ({s['ip']}){RESET}")
     while True:
         c = input(f"{CYAN}Select server: {RESET}").strip()
         if c.isdigit() and 1 <= int(c) <= len(servers):
@@ -108,8 +122,9 @@ def redraw_ui(model):
     os.system("cls" if os.name == "nt" else "clear")
     ip = selected_server['ip']
     port = selected_server['apis'][selected_api]
+    flag = country_flag(selected_server.get("country"))
     print(f"{BOLD}{GREEN}AI Terminal Interface 🖥️ | {ip}:{port}{RESET}")
-    print(f"{GREEN}Active Model: {model} | {selected_server['nickname']}{RESET}")
+    print(f"{GREEN}Active Model: {model} | {flag} {selected_server['nickname']}{RESET}")
     print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick{RESET}")
 
 def display_connecting_box():
@@ -148,8 +163,17 @@ def matrix_rain(persistent=False, duration=3):
                 for t in range(trail_length):
                     y = drop_pos - t
                     if 0 < y < rows:
-                        char = random.choice(charset)
-                        shade = "\033[92m" if t==0 else "\033[32m" if t==1 else "\033[32;2m" if t==2 else "\033[2;32m" if t==3 else "\033[30m"
+                        if t < 4:
+                            char = random.choice(charset)
+                        else:
+                            char = ' '
+                        shade = (
+                            "\033[92m" if t == 0 else
+                            "\033[32m" if t == 1 else
+                            "\033[32;2m" if t == 2 else
+                            "\033[2;32m" if t == 3 else
+                            ""
+                        )
                         print(f"\033[{y};{col+1}H{shade}{char}{RESET}", end='')
                 drops[col] = (drops[col] + 1) % (rows + trail_length)
             sys.stdout.flush()
@@ -285,18 +309,30 @@ def chat_loop(model):
 
             for p in chat_paths:
                 try:
-                    r = requests.post(f"{SERVER_URL}{p}", headers=headers,
-                                      json={"model": model, "messages": [{"role": "user", "content": user_input}], "stream": False},
-                                      timeout=60)
+                    r = requests.post(
+                        f"{SERVER_URL}{p}",
+                        headers=headers,
+                        json={"model": model, "messages": [{"role": "user", "content": user_input}], "stream": False},
+                        timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+                    )
                     r.raise_for_status()
                     data = r.json()
-                    msg = data.get("choices", [{}])[0].get("message", {}).get("content") or data.get("choices", [{}])[0].get("text") or data.get("completion")
+                    msg = (
+                        data.get("choices", [{}])[0].get("message", {}).get("content")
+                        or data.get("choices", [{}])[0].get("text")
+                        or data.get("completion")
+                    )
                     if msg:
                         resp = msg
                         break
-                except Exception as e:
+                except requests.exceptions.Timeout:
+                    print(f"\n{RED}{p} request timed out after {REQUEST_TIMEOUT}s{RESET}")
+                    server_failed = True
+                    break
+                except requests.exceptions.RequestException as e:
                     print(f"\n{RED}Failed {p}: {e}{RESET}")
                     server_failed = True
+                    break
 
             if not resp:
                 gen = ["/v1/completions"]
@@ -304,17 +340,26 @@ def chat_loop(model):
                     gen.append("/api/generate")
                 for p in gen:
                     try:
-                        r = requests.post(f"{SERVER_URL}{p}", headers=headers,
-                                          json={"model": model, "prompt": user_input, "stream": False}, timeout=60)
+                        r = requests.post(
+                            f"{SERVER_URL}{p}",
+                            headers=headers,
+                            json={"model": model, "prompt": user_input, "stream": False},
+                            timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+                        )
                         r.raise_for_status()
                         data = r.json()
                         msg = data.get("choices", [{}])[0].get("text") or data.get("completion")
                         if msg:
                             resp = msg
                             break
-                    except Exception as e:
+                    except requests.exceptions.Timeout:
+                        print(f"\n{RED}{p} request timed out after {REQUEST_TIMEOUT}s{RESET}")
+                        server_failed = True
+                        break
+                    except requests.exceptions.RequestException as e:
                         print(f"\n{RED}Failed {p}: {e}{RESET}")
                         server_failed = True
+                        break
 
             if not resp:
                 print(f"{RED}[Error] No response{RESET}")
