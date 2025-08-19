@@ -10,6 +10,9 @@ keep `endpoints.csv` up to date. It performs two tasks:
    batched queries per port.
 2. Search Shodan for additional public Ollama instances and append them.
 
+By default the script looks for hosts on the standard Ollama port (11434)
+whose HTTP response contains the text "Ollama is running".
+
 Create a `config.json` next to `shodan_scan.py` with your API key. A
 `config.example.json` template is provided:
 
