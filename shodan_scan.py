@@ -43,13 +43,13 @@ def utc_now():
 def build_name(ip, port, city, org):
     org = org or ""
     org = (org[:17] + "...") if len(org) > 20 else org
-    parts = ["Shodan"]
+    parts = []
     if city:
         parts.append(city)
     if org:
         parts.append(org)
     parts.append(f"({ip}:{port})")
-    return " ".join(parts)
+    return " ".join(parts).strip()
 
 
 def load_api_key():
