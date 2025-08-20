@@ -27,7 +27,7 @@ SERVER_URL = ""
 selected_server = None
 selected_api = None
 IDLE_TIMEOUT = 30
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 60
 CSV_PATH = "endpoints.csv"
 
 def api_headers():
