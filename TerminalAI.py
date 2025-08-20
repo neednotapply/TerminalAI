@@ -7,7 +7,6 @@ import sys
 import shutil
 import pandas as pd
 import select
-import pycountry
 
 if os.name == "nt":
     import msvcrt
@@ -35,18 +34,6 @@ def api_headers():
     return {"Content-Type": "application/json"}
 
 
-def country_flag(name):
-    if not name:
-        return ""
-    code = name.strip().upper()
-    if len(code) != 2:
-        try:
-            code = pycountry.countries.lookup(code).alpha_2.upper()
-        except Exception:
-            return ""
-    if len(code) != 2 or not code.isalpha():
-        return ""
-    return "".join(chr(ord(c) + 127397) for c in code)
 
 def load_servers():
     try:
@@ -84,8 +71,7 @@ def persist_nickname(server, new_nick):
 def select_server(servers):
     print(f"{CYAN}Available Servers:{RESET}")
     for i, s in enumerate(servers, 1):
-        flag = country_flag(s.get("country"))
-        print(f"{GREEN}{i}. {flag} {s['nickname']} ({s['ip']}){RESET}")
+        print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}){RESET}")
     while True:
         c = input(f"{CYAN}Select server: {RESET}").strip()
         if c.isdigit() and 1 <= int(c) <= len(servers):
@@ -126,9 +112,8 @@ def redraw_ui(model):
     os.system("cls" if os.name == "nt" else "clear")
     ip = selected_server['ip']
     port = selected_server['apis'][selected_api]
-    flag = country_flag(selected_server.get("country"))
     print(f"{BOLD}{GREEN}AI Terminal Interface 🖥️ | {ip}:{port}{RESET}")
-    print(f"{GREEN}Active Model: {model} | {flag} {selected_server['nickname']}{RESET}")
+    print(f"{GREEN}Active Model: {model} | {selected_server['nickname']}{RESET}")
     print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick{RESET}")
 
 def display_connecting_box():
