@@ -124,7 +124,7 @@ def display_connecting_box():
     os.system("cls" if os.name=="nt" else "clear")
     for i in range(h):
         print(f"\033[{y+i};{x}H{' '*w}{RESET}")
-    msg="CONNECTING TO SERVER"
+    msg="HACK THE PLANET"
     mx = x + (w-len(msg))//2; my = y + h//2
     print(f"\033[{my};{mx}H\033[1;32m",end='')
     for char in msg:
@@ -224,29 +224,70 @@ def chat_loop(model):
             sys.stdout.write(f"{RESET}\U0001f9d1 : ")
             sys.stdout.flush()
             user_input = ""
-            while True:
-                if time.time() - start > IDLE_TIMEOUT:
-                    matrix_rain(persistent=True)
-                    redraw_ui(model)
-                    reprint_history(history)
-                    sys.stdout.write(f"{RESET}\U0001f9d1 : ")
-                    sys.stdout.flush()
-                    start = time.time()
-                if os.name == "nt":
+            if os.name == "nt":
+                while True:
+                    if time.time() - start > IDLE_TIMEOUT:
+                        matrix_rain(persistent=True)
+                        redraw_ui(model)
+                        reprint_history(history)
+                        sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
+                        sys.stdout.flush()
+                        start = time.time()
                     if msvcrt.kbhit():
-                        user_input = input().strip()
-                        if not user_input:
-                            continue
-                        break
-                    time.sleep(0.1)
+                        ch = msvcrt.getwch()
+                        if ch in ('\r', '\n'):
+                            print()
+                            break
+                        elif ch == '\b':
+                            if user_input:
+                                user_input = user_input[:-1]
+                                sys.stdout.write('\b \b')
+                                sys.stdout.flush()
+                        else:
+                            user_input += ch
+                            sys.stdout.write(ch)
+                            sys.stdout.flush()
+                        start = time.time()
+                    else:
+                        time.sleep(0.1)
+                user_input = user_input.strip()
+                if not user_input:
                     continue
-                else:
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
-                    if rlist:
-                        user_input = input().strip()
-                        if not user_input:
-                            continue
-                        break
+            else:
+                fd = sys.stdin.fileno()
+                old_settings = termios.tcgetattr(fd)
+                tty.setcbreak(fd)
+                try:
+                    while True:
+                        if time.time() - start > IDLE_TIMEOUT:
+                            matrix_rain(persistent=True)
+                            redraw_ui(model)
+                            reprint_history(history)
+                            sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
+                            sys.stdout.flush()
+                            tty.setcbreak(fd)
+                            start = time.time()
+                        rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+                        if rlist:
+                            ch = sys.stdin.read(1)
+                            if ch in ('\n', '\r'):
+                                print()
+                                break
+                            elif ch == '\x7f':
+                                if user_input:
+                                    user_input = user_input[:-1]
+                                    sys.stdout.write('\b \b')
+                                    sys.stdout.flush()
+                            else:
+                                user_input += ch
+                                sys.stdout.write(ch)
+                                sys.stdout.flush()
+                            start = time.time()
+                finally:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
 
             cmd = user_input.lower()
             if cmd == "/exit":
@@ -385,6 +426,9 @@ def chat_loop(model):
 if __name__ == "__main__":
     selected_api = 'ollama'
 
+    display_connecting_box()
+    matrix_rain(duration=10)
+
     while True:
         # 1. Load and pick a server
         servers = load_servers()
@@ -410,8 +454,6 @@ if __name__ == "__main__":
 
         # 3. Pick a model
         chosen = select_model(models)
-        display_connecting_box()
-        matrix_rain(duration=10)
 
         # 4. Chat loop
         result = chat_loop(chosen)
