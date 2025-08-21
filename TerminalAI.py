@@ -8,9 +8,8 @@ import shutil
 import pandas as pd
 import select
 import json
-import subprocess
-import re
 import threading
+import socket
 
 if os.name == "nt":
     import msvcrt
@@ -114,20 +113,15 @@ def save_conversation(model, messages, context=None):
         print(f"{RED}Failed to save conversation: {e}{RESET}")
 
 
-def ping_time(ip):
+def ping_time(ip, port):
+    """Measure latency to an IP and port using a TCP handshake."""
     try:
-        if os.name == "nt":
-            cmd = ["ping", "-n", "1", "-w", "1000", ip]
-        else:
-            cmd = ["ping", "-c", "1", "-W", "1", ip]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode == 0:
-            m = re.search(r"time[=<]([0-9.]+) ms", res.stdout)
-            if m:
-                return float(m.group(1))
+        start = time.time()
+        with socket.create_connection((ip, int(port)), timeout=1):
+            end = time.time()
+        return (end - start) * 1000
     except Exception:
-        pass
-    return None
+        return None
 
 
 def update_pings():
@@ -139,7 +133,7 @@ def update_pings():
         df["ping"] = ""
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for idx, row in df.iterrows():
-        latency = ping_time(row["ip"])
+        latency = ping_time(row["ip"], row["port"])
         if latency is None:
             df.at[idx, "ping"] = ""
             df.at[idx, "is_active"] = False
