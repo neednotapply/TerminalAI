@@ -683,7 +683,7 @@ if __name__ == "__main__":
     ping_thread.join()
     stop_rain.set()
     rain_thread.join()
-    display_connecting_box(box_x, box_y, box_w, box_h)
+    os.system("cls" if os.name == "nt" else "clear")
 
     while True:
         # 1. Load and pick a server
@@ -716,13 +716,21 @@ if __name__ == "__main__":
 
             # 4. Pick or start conversation
             while True:
-                conv_file, messages, history, context = select_conversation(chosen)
-                if conv_file == 'back':
-                    break  # back to model selection
+                if has_conversations(chosen):
+                    conv_file, messages, history, context = select_conversation(chosen)
+                    if conv_file == 'back':
+                        break  # back to model selection
+                else:
+                    print(f"{CYAN}No previous conversations found.{RESET}")
+                    conv_file, messages, history, context = (None, [], [], None)
 
                 result = chat_loop(chosen, conv_file, messages, history, context)
                 if result == 'back':
-                    continue  # back to conversation selection
+                    if has_conversations(chosen):
+                        continue  # back to conversation selection
+                    else:
+                        conv_file = 'back'
+                        break
                 elif result == 'server_inactive':
                     conv_file = 'server_inactive'
                     break

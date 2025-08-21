@@ -65,14 +65,14 @@ print_options() {
   printf "2) Scan Shodan${RESET}"
 }
 
-draw_header
-draw_box
-print_options
-
 python3 rain.py --persistent \
   --exclude "$HEADER_TOP,$HEADER_BOTTOM,$HEADER_LEFT,$HEADER_RIGHT" \
   --exclude "$BOX_TOP,$BOX_BOTTOM,$BOX_LEFT,$BOX_RIGHT" &
 R_PID=$!
+
+draw_header
+draw_box
+print_options
 
 cleanup() {
   kill $R_PID 2>/dev/null || true
