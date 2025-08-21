@@ -5,6 +5,8 @@ GREEN="\033[32m"
 RESET="\033[0m"
 BOLD="\033[1m"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 clear
 tput civis
 
@@ -24,7 +26,6 @@ BOX_TOP=$((HEADER_BOTTOM + 2))
 BOX_LEFT=$(((COLS - BOX_WIDTH) / 2))
 BOX_RIGHT=$((BOX_LEFT + BOX_WIDTH - 1))
 BOX_BOTTOM=$((BOX_TOP + BOX_HEIGHT - 1))
-PROMPT_ROW=$((BOX_BOTTOM + 1))
 
 # convert to 1-based coordinates for rain exclusion
 RAIN_HEADER_TOP=$((HEADER_TOP+1))
@@ -75,7 +76,7 @@ print_options() {
   printf "2) Scan Shodan${RESET}"
 }
 
-  python3 rain.py --persistent --no-clear \
+  python3 "$SCRIPT_DIR/scripts/rain.py" --persistent --no-clear \
     --exclude "$RAIN_HEADER_TOP,$RAIN_HEADER_BOTTOM,$RAIN_HEADER_LEFT,$RAIN_HEADER_RIGHT" \
     --exclude "$RAIN_BOX_TOP,$RAIN_BOX_BOTTOM,$RAIN_BOX_LEFT,$RAIN_BOX_RIGHT" &
 R_PID=$!
@@ -90,12 +91,10 @@ cleanup() {
   clear
 }
 trap cleanup EXIT
-
-tput cup $PROMPT_ROW $BOX_LEFT
-read -p "Select option: " choice
-
-case "$choice" in
-  1) cleanup; python3 TerminalAI.py "$@" ;;
-  2) cleanup; python3 shodanscan.py "$@" ;;
-  *) cleanup; echo "Invalid selection" >&2; exit 1 ;;
-esac
+while true; do
+  read -rsn1 choice
+  case "$choice" in
+    1) cleanup; python3 "$SCRIPT_DIR/scripts/TerminalAI.py" "$@"; break ;;
+    2) cleanup; python3 "$SCRIPT_DIR/scripts/shodanscan.py" "$@"; break ;;
+  esac
+done

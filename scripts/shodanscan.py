@@ -10,8 +10,10 @@ import shodan
 import socket
 import time
 
-CSV_PATH = "endpoints.csv"
-CONFIG_PATH = Path(__file__).with_name("config.json")
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+CSV_PATH = DATA_DIR / "endpoints.csv"
+CONFIG_PATH = DATA_DIR / "config.json"
 SHODAN_QUERIES = [
     'http.html:"Ollama is running" port:11434'
 ]

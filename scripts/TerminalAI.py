@@ -10,6 +10,7 @@ import json
 import re
 import threading
 import socket
+from pathlib import Path
 from rain import rain
 
 if os.name == "nt":
@@ -27,14 +28,25 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 AI_COLOR = "\033[32m"
 
+def heat_color(ping):
+    if ping is None or ping == float("inf"):
+        return RED
+    max_ping = 1000.0
+    p = max(0.0, min(ping, max_ping)) / max_ping
+    r = int(255 * p)
+    g = int(255 * (1 - p))
+    return f"\033[38;2;{r};{g};0m"
+
 SERVER_URL = ""
 selected_server = None
 selected_api = None
 IDLE_TIMEOUT = 30
 REQUEST_TIMEOUT = 60
-CSV_PATH = "endpoints.csv"
-CONV_DIR = "conversations"
-LOG_DIR = "logs"
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+CSV_PATH = DATA_DIR / "endpoints.csv"
+CONV_DIR = DATA_DIR / "conversations"
+LOG_DIR = DATA_DIR / "logs"
 
 def api_headers():
     return {"Content-Type": "application/json"}
@@ -173,8 +185,8 @@ def persist_nickname(server, new_nick):
 
 def conv_dir(model):
     safe = re.sub(r'[\\/:*?"<>|]', '_', model)
-    path = os.path.join(CONV_DIR, safe)
-    os.makedirs(path, exist_ok=True)
+    path = CONV_DIR / safe
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 def list_conversations(model):
@@ -182,10 +194,10 @@ def list_conversations(model):
     convs = []
     for fn in sorted(os.listdir(path)):
         if fn.endswith(".json"):
-            fp = os.path.join(path, fn)
+            fp = path / fn
             title = fn[:-5]
             try:
-                with open(fp, "r", encoding="utf-8") as f:
+                with fp.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     msgs = data.get("messages", [])
@@ -200,12 +212,12 @@ def list_conversations(model):
     return convs
 
 def load_conversation(model, file):
-    path = os.path.join(conv_dir(model), file)
+    path = conv_dir(model) / file
     messages = []
     context = None
-    if os.path.exists(path):
+    if path.exists():
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 messages = data.get("messages", [])
@@ -223,9 +235,9 @@ def load_conversation(model, file):
     return messages, history, context
 
 def save_conversation(model, file, messages, context=None):
-    path = os.path.join(conv_dir(model), file)
+    path = conv_dir(model) / file
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with path.open("w", encoding="utf-8") as f:
             json.dump({"messages": messages, "context": context}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"{RED}Failed to save conversation: {e}{RESET}")
@@ -284,8 +296,12 @@ def update_pings():
 def select_server(servers):
     print(f"{CYAN}Available Servers:{RESET}")
     for i, s in enumerate(servers, 1):
-        ping = "?" if s.get("ping", float("inf")) == float("inf") else f"{s['ping']:.1f} ms"
-        print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}) - {ping}{RESET}")
+        ping_val = s.get("ping", float("inf"))
+        ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
+        color = heat_color(ping_val)
+        ip_col = f"{color}{s['ip']}{RESET}"
+        ping_col = f"{color}{ping_str}{RESET}"
+        print(f"{GREEN}{i}. {s['nickname']}{RESET} ({ip_col}) - {ping_col}")
     while True:
         c = input(f"{CYAN}Select server: {RESET}").strip()
         if c.isdigit() and 1 <= int(c) <= len(servers):
@@ -338,10 +354,14 @@ def display_connecting_box(x, y, w, h):
     for i in range(h):
         print(f"\033[{y+i};{x}H{' '*w}{RESET}")
     sys.stdout.flush()
+    print(f"\033[{y};{x}H{GREEN}┌{'─'*(w-2)}┐{RESET}")
+    for i in range(1, h-1):
+        print(f"\033[{y+i};{x}H{GREEN}│{' '*(w-2)}│{RESET}")
+    print(f"\033[{y+h-1};{x}H{GREEN}└{'─'*(w-2)}┘{RESET}")
     msg = "HACK THE PLANET"
     mx = x + (w - len(msg)) // 2
     my = y + h // 2
-    print(f"\033[{my};{mx}H\033[1;32m{msg}{RESET}", flush=True)
+    print(f"\033[{my};{mx}H{BOLD}{GREEN}{msg}{RESET}", flush=True)
     time.sleep(1.5)
 
 
@@ -495,9 +515,9 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             elif cmd == "/print":
                 if history:
                     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    os.makedirs(LOG_DIR, exist_ok=True)
-                    fn = os.path.join(LOG_DIR, f"chat_{ts}.txt")
-                    with open(fn, "w", encoding="utf-8") as f:
+                    LOG_DIR.mkdir(parents=True, exist_ok=True)
+                    fn = LOG_DIR / f"chat_{ts}.txt"
+                    with fn.open("w", encoding="utf-8") as f:
                         for h in history:
                             f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
                     print(f"{YELLOW}Saved to {fn}{RESET}")
@@ -662,9 +682,9 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             save = input(f"{CYAN}Save log? (y/n): {RESET}").lower()
             if save == "y":
                 ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                os.makedirs(LOG_DIR, exist_ok=True)
-                fn = os.path.join(LOG_DIR, f"chat_{ts}.txt")
-                with open(fn, "w", encoding="utf-8") as f:
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                fn = LOG_DIR / f"chat_{ts}.txt"
+                with fn.open("w", encoding="utf-8") as f:
                     for h in history:
                         f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
                 print(f"Saved to {fn}")
@@ -701,6 +721,7 @@ if __name__ == "__main__":
     os.system("cls" if os.name == "nt" else "clear")
 
     while True:
+        os.system("cls" if os.name == "nt" else "clear")
         # 1. Load and pick a server
         servers = load_servers()
         srv_list = [s for s in servers if selected_api in s["apis"]]
@@ -727,6 +748,7 @@ if __name__ == "__main__":
         while True:
             chosen = select_model(models)
             if chosen is None:
+                os.system("cls" if os.name == "nt" else "clear")
                 break  # back to server selection
 
             # 4. Pick or start conversation
@@ -741,6 +763,7 @@ if __name__ == "__main__":
 
                 result = chat_loop(chosen, conv_file, messages, history, context)
                 if result == 'back':
+                    os.system("cls" if os.name == "nt" else "clear")
                     if has_conversations(chosen):
                         continue  # back to conversation selection
                     else:
@@ -754,8 +777,10 @@ if __name__ == "__main__":
                 else:
                     sys.exit(0)
             if conv_file == 'back':
+                os.system("cls" if os.name == "nt" else "clear")
                 continue  # select model again
             elif conv_file == 'server_inactive':
+                os.system("cls" if os.name == "nt" else "clear")
                 break  # back to server selection
             else:
                 break
