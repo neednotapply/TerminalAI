@@ -21,7 +21,7 @@ the `logs` directory, which is created automatically if needed.
 
 ## Automatic population
 
-The `shodan_scan.py` helper uses the [Shodan](https://www.shodan.io/) API to
+The `shodanscan.py` helper uses the [Shodan](https://www.shodan.io/) API to
 keep `endpoints.csv` up to date. It performs two tasks:
 
 1. Verify the online status of servers already present in the CSV using
@@ -35,7 +35,7 @@ As part of the scan each server is also pinged locally. The round-trip time is
 stored in the `ping` column and any host that does not answer is marked
 inactive.
 
-Create a `config.json` next to `shodan_scan.py` with your API key. A
+Create a `config.json` next to `shodanscan.py` with your API key. A
 `config.example.json` template is provided:
 
 ```json
@@ -48,7 +48,7 @@ Alternatively, set the `SHODAN_API_KEY` environment variable. The file takes
 precedence over the environment variable if both are present. Run the script:
 
 ```bash
-python shodan_scan.py
+python shodanscan.py
 ```
 
 The script uses Python's built-in logging module to report its progress. By
@@ -56,16 +56,16 @@ default it logs informational messages; pass `--verbose` to enable debug level
 output:
 
 ```bash
-python shodan_scan.py --verbose
+python shodanscan.py --verbose
 ```
 
-To control API usage, results from each Shodan query are limited to 100 entries by default.
-Use `--limit` to change how many new endpoints are fetched per query.
-Existing entries are checked in batches of 100; adjust this with `--existing-limit` to
-control API usage for large CSVs.
+By default results from each Shodan query are limited to 25 new endpoints.
+Use `--limit` to change how many fresh results are appended per query.
+Existing entries are checked starting with the oldest `last_check_date`; adjust
+`--existing-limit` to control how many are verified on each run.
 
 ```bash
-python shodan_scan.py --limit 50 --existing-limit 25
+python shodanscan.py --limit 50 --existing-limit 25
 ```
 
 The script requires the `shodan` and `pandas` packages. It also enriches each
