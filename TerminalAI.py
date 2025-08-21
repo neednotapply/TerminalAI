@@ -40,6 +40,87 @@ def api_headers():
     return {"Content-Type": "application/json"}
 
 
+def start_thinking_timer():
+    start = time.time()
+    stop_event = threading.Event()
+
+    def updater():
+        while not stop_event.is_set():
+            elapsed = int(time.time() - start)
+            print(
+                f"\r{AI_COLOR}\U0001f5a5️ : thinking... ({elapsed}s){RESET}",
+                end="",
+                flush=True,
+            )
+            time.sleep(1)
+
+    threading.Thread(target=updater, daemon=True).start()
+    return start, stop_event
+
+
+def stop_thinking_timer(start, stop_event, timed_out=False):
+    stop_event.set()
+    elapsed = int(time.time() - start)
+    status = " [Timed out]" if timed_out else ""
+    print(
+        f"\r{AI_COLOR}\U0001f5a5️ : thinking... ({elapsed}s){status}{RESET}"
+    )
+    return elapsed
+
+
+def get_input(prompt):
+    if os.name == "nt":
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        buf = ""
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                print()
+                return buf.strip()
+            elif ch == "\b":
+                if buf:
+                    buf = buf[:-1]
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+            elif ch == "\x1b":
+                print()
+                return "ESC"
+            else:
+                buf += ch
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+    else:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            buf = ""
+            while True:
+                rlist, _, _ = select.select([sys.stdin], [], [], None)
+                if rlist:
+                    ch = sys.stdin.read(1)
+                    if ch in ("\n", "\r"):
+                        print()
+                        return buf.strip()
+                    elif ch == "\x7f":
+                        if buf:
+                            buf = buf[:-1]
+                            sys.stdout.write("\b \b")
+                            sys.stdout.flush()
+                    elif ch == "\x1b":
+                        print()
+                        return "ESC"
+                    else:
+                        buf += ch
+                        sys.stdout.write(ch)
+                        sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 
 def load_servers():
     try:
@@ -200,13 +281,13 @@ def select_server(servers):
 
 def select_model(models):
     print(f"{CYAN}Available Models:{RESET}")
-    print(f"{GREEN}0. Back{RESET}")
     for i, model in enumerate(models, 1):
         mark = " *" if has_conversations(model) else ""
         print(f"{GREEN}{i}. {model}{mark}{RESET}")
+    print(f"{GREEN}0. [Back]{RESET}")
     while True:
-        c = input(f"{CYAN}Select model: {RESET}").strip()
-        if c == '0':
+        c = get_input(f"{CYAN}Select model: {RESET}")
+        if c in ("ESC", "0") or c.lower() == "back":
             return None
         if c.isdigit() and 1 <= int(c) <= len(models):
             return models[int(c) - 1]
@@ -238,7 +319,7 @@ def redraw_ui(model):
     port = selected_server['apis'][selected_api]
     print(f"{BOLD}{GREEN}AI Terminal Interface 🖥️ | {ip}:{port}{RESET}")
     print(f"{GREEN}Active Model: {model} | {selected_server['nickname']}{RESET}")
-    print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick{RESET}")
+    print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick (Esc=Back){RESET}")
 
 def display_connecting_box(x, y, w, h):
     for i in range(h):
@@ -292,11 +373,11 @@ def select_conversation(model):
     print(f"{GREEN}1. Start new conversation{RESET}")
     for i, c in enumerate(convs, 2):
         print(f"{GREEN}{i}. {c['title']}{RESET}")
-    print(f"{GREEN}0. Back{RESET}")
+    print(f"{GREEN}0. [Back]{RESET}")
 
     while True:
-        choice = input(f"{CYAN}Select conversation: {RESET}").strip()
-        if choice == '0':
+        choice = get_input(f"{CYAN}Select conversation: {RESET}")
+        if choice in ("ESC", "0") or choice.lower() == "back":
             return 'back', None, None, None
         if choice == '1':
             return None, [], [], None
@@ -335,6 +416,9 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         if ch in ('\r', '\n'):
                             print()
                             break
+                        elif ch == '\x1b':
+                            print()
+                            return "back"
                         elif ch == '\b':
                             if user_input:
                                 user_input = user_input[:-1]
@@ -375,6 +459,9 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                                     user_input = user_input[:-1]
                                     sys.stdout.write('\b \b')
                                     sys.stdout.flush()
+                            elif ch == '\x1b':
+                                print()
+                                return "back"
                             else:
                                 user_input += ch
                                 sys.stdout.write(ch)
@@ -428,15 +515,19 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             if conv_file is None:
                 conv_file = create_conversation_file(model, user_input)
 
-            print(f"{AI_COLOR}\U0001f5a5️ : thinking...", end='', flush=True)
+            start, stop_event = start_thinking_timer()
             headers = api_headers()
             resp = None
             server_failed = False
-            timeout_val = REQUEST_TIMEOUT + (len(messages) // 2) * 5
+            timed_out = False
+            timeout_val = REQUEST_TIMEOUT * (len(messages) + 1)
 
-            chat_paths = ["/v1/chat/completions"]
-            if selected_api == "ollama":
-                chat_paths.append("/api/chat")
+            chat_paths = [
+                "/v1/chat/completions",
+                "/v1/chat",
+                "/api/chat",
+                "/chat",
+            ]
 
             for p in chat_paths:
                 try:
@@ -464,16 +555,23 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 except requests.exceptions.Timeout:
                     print(f"\n{RED}{p} request timed out after {timeout_val}s{RESET}")
                     server_failed = True
+                    timed_out = True
                     break
+                except requests.exceptions.HTTPError as e:
+                    print(f"\n{RED}Failed {p}: {e}{RESET}")
+                    continue
                 except requests.exceptions.RequestException as e:
                     print(f"\n{RED}Failed {p}: {e}{RESET}")
                     server_failed = True
                     break
 
             if not resp:
-                gen = ["/v1/completions"]
-                if selected_api == "ollama":
-                    gen.append("/api/generate")
+                gen = [
+                    "/v1/completions",
+                    "/v1/complete",
+                    "/api/generate",
+                    "/generate",
+                ]
                 for p in gen:
                     try:
                         if p == "/api/generate":
@@ -506,7 +604,11 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     except requests.exceptions.Timeout:
                         print(f"\n{RED}{p} request timed out after {timeout_val}s{RESET}")
                         server_failed = True
+                        timed_out = True
                         break
+                    except requests.exceptions.HTTPError as e:
+                        print(f"\n{RED}Failed {p}: {e}{RESET}")
+                        continue
                     except requests.exceptions.RequestException as e:
                         print(f"\n{RED}Failed {p}: {e}{RESET}")
                         server_failed = True
@@ -515,6 +617,12 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             if not resp:
                 print(f"{RED}[Error] No response{RESET}")
                 server_failed = True
+
+            elapsed = stop_thinking_timer(start, stop_event, timed_out)
+            log_msg = (
+                f"Timed out after {elapsed}s" if timed_out else f"Finished thinking in {elapsed}s"
+            )
+            print(f"{YELLOW}{log_msg}{RESET}")
 
             if server_failed:
                 try:
@@ -526,13 +634,14 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     print(f"{RED}Failed to update CSV: {ex}{RESET}")
                 return "server_inactive"
 
-            print("\r\033[K", end='')
-            print(f"{AI_COLOR}\U0001f5a5️ : ", end='')
-            render_markdown(resp)
-            messages.append({"role": "user", "content": user_input})
-            messages.append({"role": "assistant", "content": resp})
-            history.append({"user": user_input, "ai": resp})
-            save_conversation(model, conv_file, messages, context)
+            if not timed_out and resp:
+                print("\r\033[K", end='')
+                print(f"{AI_COLOR}\U0001f5a5️ : ", end='')
+                render_markdown(resp)
+                messages.append({"role": "user", "content": user_input})
+                messages.append({"role": "assistant", "content": resp})
+                history.append({"user": user_input, "ai": resp})
+                save_conversation(model, conv_file, messages, context)
 
     except KeyboardInterrupt:
         print(f"{YELLOW}Session interrupted{RESET}")
@@ -574,6 +683,7 @@ if __name__ == "__main__":
     ping_thread.join()
     stop_rain.set()
     rain_thread.join()
+    display_connecting_box(box_x, box_y, box_w, box_h)
 
     while True:
         # 1. Load and pick a server

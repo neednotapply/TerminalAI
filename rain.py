@@ -40,6 +40,9 @@ def rain(
     charset = (
         "01$#*+=-░▒▓▌▐▄▀▁▂▃▅▆▇█ﾊﾐﾋｰｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ" "01$#*+=-"
     )
+    fd = None
+    old_settings = None
+    stdin_is_tty = sys.stdin.isatty()
     try:
         print("\033[?25l", end="")
         os.system("cls" if os.name == "nt" else "clear")
@@ -47,10 +50,13 @@ def rain(
         columns, rows = shutil.get_terminal_size(fallback=(80, 24))
         trail_length = 6
         drops = [random.randint(0, rows) for _ in range(columns)]
-        if os.name != "nt":
+        if os.name != "nt" and stdin_is_tty:
             fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            tty.setcbreak(fd)
+            try:
+                old_settings = termios.tcgetattr(fd)
+                tty.setcbreak(fd)
+            except termios.error:
+                stdin_is_tty = False
         while (persistent or time.time() < end_time) and (
             stop_event is None or not stop_event.is_set()
         ):
@@ -91,13 +97,13 @@ def rain(
                     if msvcrt.kbhit():
                         msvcrt.getch()
                         break
-                else:
+                elif stdin_is_tty:
                     dr, _, _ = select.select([sys.stdin], [], [], 0)
                     if dr:
                         os.read(sys.stdin.fileno(), 1)
                         break
     finally:
-        if os.name != "nt":
+        if os.name != "nt" and old_settings is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         time.sleep(0.5)
         print("\033[0m\033[2J\033[H\033[?25h", end="")
