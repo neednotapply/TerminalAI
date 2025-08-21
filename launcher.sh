@@ -69,7 +69,7 @@ draw_header
 draw_box
 print_options
 
-python rain.py --persistent \
+python3 rain.py --persistent \
   --exclude "$HEADER_TOP,$HEADER_BOTTOM,$HEADER_LEFT,$HEADER_RIGHT" \
   --exclude "$BOX_TOP,$BOX_BOTTOM,$BOX_LEFT,$BOX_RIGHT" &
 R_PID=$!
@@ -85,7 +85,7 @@ tput cup $PROMPT_ROW $BOX_LEFT
 read -p "Select option: " choice
 
 case "$choice" in
-  1) cleanup; python TerminalAI.py "$@" ;;
-  2) cleanup; python shodanscan.py "$@" ;;
+  1) cleanup; python3 TerminalAI.py "$@" ;;
+  2) cleanup; python3 shodanscan.py "$@" ;;
   *) cleanup; echo "Invalid selection" >&2; exit 1 ;;
 esac
