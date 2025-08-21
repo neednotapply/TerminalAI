@@ -25,6 +25,7 @@ def rain(
     box_left=None,
     box_right=None,
     boxes=None,
+    clear_screen=True,
 ):
     if boxes is None:
         boxes = []
@@ -45,7 +46,8 @@ def rain(
     stdin_is_tty = sys.stdin.isatty()
     try:
         print("\033[?25l", end="")
-        os.system("cls" if os.name == "nt" else "clear")
+        if clear_screen:
+            os.system("cls" if os.name == "nt" else "clear")
         end_time = time.time() + duration if not persistent else None
         columns, rows = shutil.get_terminal_size(fallback=(80, 24))
         trail_length = 6
@@ -106,7 +108,10 @@ def rain(
         if os.name != "nt" and old_settings is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         time.sleep(0.5)
-        print("\033[0m\033[2J\033[H\033[?25h", end="")
+        if clear_screen:
+            print("\033[0m\033[2J\033[H\033[?25h", end="")
+        else:
+            print("\033[0m\033[?25h", end="")
 
 
 def main():
@@ -119,13 +124,19 @@ def main():
         metavar="TOP,BOTTOM,LEFT,RIGHT",
         help="Exclusion box coordinates",
     )
+    parser.add_argument("--no-clear", action="store_true", help="Don't clear screen")
     args = parser.parse_args()
     boxes = []
     if args.exclude:
         for ex in args.exclude:
             t, b, l, r = map(int, ex.split(","))
             boxes.append({"top": t, "bottom": b, "left": l, "right": r})
-    rain(persistent=args.persistent, duration=args.duration, boxes=boxes)
+    rain(
+        persistent=args.persistent,
+        duration=args.duration,
+        boxes=boxes,
+        clear_screen=not args.no_clear,
+    )
 
 
 if __name__ == "__main__":

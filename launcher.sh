@@ -26,6 +26,16 @@ BOX_RIGHT=$((BOX_LEFT + BOX_WIDTH - 1))
 BOX_BOTTOM=$((BOX_TOP + BOX_HEIGHT - 1))
 PROMPT_ROW=$((BOX_BOTTOM + 1))
 
+# convert to 1-based coordinates for rain exclusion
+RAIN_HEADER_TOP=$((HEADER_TOP+1))
+RAIN_HEADER_BOTTOM=$((HEADER_BOTTOM+1))
+RAIN_HEADER_LEFT=$((HEADER_LEFT+1))
+RAIN_HEADER_RIGHT=$((HEADER_RIGHT+1))
+RAIN_BOX_TOP=$((BOX_TOP+1))
+RAIN_BOX_BOTTOM=$((BOX_BOTTOM+1))
+RAIN_BOX_LEFT=$((BOX_LEFT+1))
+RAIN_BOX_RIGHT=$((BOX_RIGHT+1))
+
 draw_header() {
   tput cup $HEADER_TOP $HEADER_LEFT
   printf "${BOLD}${GREEN}████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗      █████╗ ██╗\n"
@@ -65,14 +75,14 @@ print_options() {
   printf "2) Scan Shodan${RESET}"
 }
 
+  python3 rain.py --persistent --no-clear \
+    --exclude "$RAIN_HEADER_TOP,$RAIN_HEADER_BOTTOM,$RAIN_HEADER_LEFT,$RAIN_HEADER_RIGHT" \
+    --exclude "$RAIN_BOX_TOP,$RAIN_BOX_BOTTOM,$RAIN_BOX_LEFT,$RAIN_BOX_RIGHT" &
+R_PID=$!
+
 draw_header
 draw_box
 print_options
-
-python3 rain.py --persistent \
-  --exclude "$HEADER_TOP,$HEADER_BOTTOM,$HEADER_LEFT,$HEADER_RIGHT" \
-  --exclude "$BOX_TOP,$BOX_BOTTOM,$BOX_LEFT,$BOX_RIGHT" &
-R_PID=$!
 
 cleanup() {
   kill $R_PID 2>/dev/null || true
