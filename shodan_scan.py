@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import shodan
+import subprocess
+import re
 
 CSV_PATH = "endpoints.csv"
 CONFIG_PATH = Path(__file__).with_name("config.json")
@@ -33,6 +35,7 @@ COLUMNS = [
     "country",
     "latitude",
     "longitude",
+    "ping",
 ]
 
 
@@ -66,6 +69,25 @@ def load_api_key():
     if not key:
         logging.info("Shodan API key not found")
     return key
+
+
+def ping_time(ip):
+    """Return the ping time in ms or None if unreachable."""
+    try:
+        if os.name == "nt":
+            cmd = ["ping", "-n", "1", "-w", "1000", ip]
+        else:
+            cmd = ["ping", "-c", "1", "-W", "1", ip]
+        res = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        if res.returncode == 0:
+            m = re.search(r"time[=<]([0-9.]+) ms", res.stdout)
+            if m:
+                return float(m.group(1))
+    except Exception:
+        pass
+    return None
 
 
 def update_existing(api, df, batch_size):
@@ -125,6 +147,15 @@ def update_existing(api, df, batch_size):
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = errors.get(key, "port closed")
             df.at[idx, "last_check_date"] = now
+        latency = ping_time(ip)
+        if latency is None:
+            df.at[idx, "ping"] = ""
+            df.at[idx, "is_active"] = False
+            df.at[idx, "inactive_reason"] = "ping timeout"
+        else:
+            df.at[idx, "ping"] = latency
+            df.at[idx, "is_active"] = True
+            df.at[idx, "inactive_reason"] = ""
     return df
 
 
@@ -168,12 +199,24 @@ def find_new(api, df, limit):
                 "country": country,
                 "latitude": location.get("latitude", ""),
                 "longitude": location.get("longitude", ""),
+                "ping": "",
             })
             existing.add((ip, str(port)))
             count += 1
         logging.info(f"Processed {count} results for query: {query}")
     if new_rows:
-        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+        new_df = pd.DataFrame(new_rows)
+        for idx, row in new_df.iterrows():
+            latency = ping_time(row["ip"])
+            if latency is None:
+                new_df.at[idx, "ping"] = ""
+                new_df.at[idx, "is_active"] = False
+                new_df.at[idx, "inactive_reason"] = "ping timeout"
+            else:
+                new_df.at[idx, "ping"] = latency
+                new_df.at[idx, "is_active"] = True
+                new_df.at[idx, "inactive_reason"] = ""
+        df = pd.concat([df, new_df], ignore_index=True)
     return df
 
 
