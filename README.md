@@ -1,6 +1,10 @@
 Basic script to converse with Ollama endpoints.
 "endpoints.csv" needs to be populated with valid Ollama endpoints.
 
+Use `launcher.sh` (Linux/macOS) or `launcher.bat` (Windows) for a retro
+ANSI menu that lets you choose between scanning Shodan and starting the
+TerminalAI chat client.
+
 Conversations are stored per model in the `conversations` directory. After
 selecting a model you can resume a previous chat if one exists or start a new
 session. Requests to chat-style endpoints still resend the full message history

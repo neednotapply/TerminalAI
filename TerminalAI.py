@@ -168,8 +168,13 @@ def update_pings():
         return
     if "ping" not in df.columns:
         df["ping"] = ""
+    if "is_active" not in df.columns:
+        df["is_active"] = True
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for idx, row in df.iterrows():
+        active_val = str(row.get("is_active", "")).strip().lower()
+        if active_val not in ("true", "1", "yes", "t"):
+            continue
         latency = ping_time(row["ip"], row["port"])
         if latency is None:
             df.at[idx, "ping"] = ""
