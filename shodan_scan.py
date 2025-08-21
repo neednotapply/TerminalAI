@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import shodan
-import subprocess
-import re
+import socket
+import time
 
 CSV_PATH = "endpoints.csv"
 CONFIG_PATH = Path(__file__).with_name("config.json")
@@ -71,23 +71,15 @@ def load_api_key():
     return key
 
 
-def ping_time(ip):
-    """Return the ping time in ms or None if unreachable."""
+def ping_time(ip, port):
+    """Return the TCP connect latency in ms or None if unreachable."""
     try:
-        if os.name == "nt":
-            cmd = ["ping", "-n", "1", "-w", "1000", ip]
-        else:
-            cmd = ["ping", "-c", "1", "-W", "1", ip]
-        res = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        if res.returncode == 0:
-            m = re.search(r"time[=<]([0-9.]+) ms", res.stdout)
-            if m:
-                return float(m.group(1))
+        start = time.time()
+        with socket.create_connection((ip, int(port)), timeout=1):
+            end = time.time()
+        return (end - start) * 1000
     except Exception:
-        pass
-    return None
+        return None
 
 
 def update_existing(api, df, batch_size):
@@ -147,7 +139,7 @@ def update_existing(api, df, batch_size):
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = errors.get(key, "port closed")
             df.at[idx, "last_check_date"] = now
-        latency = ping_time(ip)
+        latency = ping_time(ip, port)
         if latency is None:
             df.at[idx, "ping"] = ""
             df.at[idx, "is_active"] = False
@@ -207,7 +199,7 @@ def find_new(api, df, limit):
     if new_rows:
         new_df = pd.DataFrame(new_rows)
         for idx, row in new_df.iterrows():
-            latency = ping_time(row["ip"])
+            latency = ping_time(row["ip"], row["port"])
             if latency is None:
                 new_df.at[idx, "ping"] = ""
                 new_df.at[idx, "is_active"] = False
