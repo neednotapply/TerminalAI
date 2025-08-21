@@ -77,13 +77,36 @@ def persist_nickname(server, new_nick):
     except Exception as e:
         print(f"{RED}Failed to persist nickname: {e}{RESET}")
 
-def conv_path(model):
+def conv_dir(model):
     safe = re.sub(r'[\\/:*?"<>|]', '_', model)
-    os.makedirs(CONV_DIR, exist_ok=True)
-    return os.path.join(CONV_DIR, f"{safe}.json")
+    path = os.path.join(CONV_DIR, safe)
+    os.makedirs(path, exist_ok=True)
+    return path
 
-def load_conversation(model):
-    path = conv_path(model)
+def list_conversations(model):
+    path = conv_dir(model)
+    convs = []
+    for fn in sorted(os.listdir(path)):
+        if fn.endswith(".json"):
+            fp = os.path.join(path, fn)
+            title = fn[:-5]
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    msgs = data.get("messages", [])
+                    if msgs:
+                        first = msgs[0].get("content", "")
+                        first = first.strip()
+                        if first:
+                            title = (first[:30] + ("..." if len(first) > 30 else ""))
+            except Exception:
+                pass
+            convs.append({"file": fn, "title": title})
+    return convs
+
+def load_conversation(model, file):
+    path = os.path.join(conv_dir(model), file)
     messages = []
     context = None
     if os.path.exists(path):
@@ -105,13 +128,26 @@ def load_conversation(model):
         history.append({"user": user, "ai": ai})
     return messages, history, context
 
-def save_conversation(model, messages, context=None):
-    path = conv_path(model)
+def save_conversation(model, file, messages, context=None):
+    path = os.path.join(conv_dir(model), file)
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"messages": messages, "context": context}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"{RED}Failed to save conversation: {e}{RESET}")
+
+def create_conversation_file(model, first_prompt):
+    safe_prompt = re.sub(r'[\\/:*?"<>|]', '_', first_prompt.strip())
+    safe_prompt = safe_prompt[:30]
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{ts}_{safe_prompt}.json"
+    # ensure directory exists
+    conv_dir(model)
+    return filename
+
+def has_conversations(model):
+    path = conv_dir(model)
+    return any(fn.endswith(".json") for fn in os.listdir(path))
 
 
 def ping_time(ip, port):
@@ -159,10 +195,14 @@ def select_server(servers):
 
 def select_model(models):
     print(f"{CYAN}Available Models:{RESET}")
+    print(f"{GREEN}b. ...{RESET}")
     for i, model in enumerate(models, 1):
-        print(f"{GREEN}{i}. {model}{RESET}")
+        mark = " *" if has_conversations(model) else ""
+        print(f"{GREEN}{i}. {model}{mark}{RESET}")
     while True:
-        c = input(f"{CYAN}Select model: {RESET}").strip()
+        c = input(f"{CYAN}Select model: {RESET}").strip().lower()
+        if c == 'b':
+            return None
         if c.isdigit() and 1 <= int(c) <= len(models):
             return models[int(c) - 1]
         print(f"{RED}Invalid selection{RESET}")
@@ -297,7 +337,31 @@ def reprint_history(history):
         print(f"{AI_COLOR}🖥️ : ",end='')
         render_markdown(e['ai'])
 
-def chat_loop(model, messages=None, history=None, context=None):
+def select_conversation(model):
+    convs = list_conversations(model)
+    if not convs:
+        print(f"{CYAN}No previous conversations found.{RESET}")
+        print(f"{GREEN}0. Start new conversation{RESET}")
+        print(f"{GREEN}b. ...{RESET}")
+    else:
+        print(f"{CYAN}Conversations:{RESET}")
+        print(f"{GREEN}0. Start new conversation{RESET}")
+        for i, c in enumerate(convs, 1):
+            print(f"{GREEN}{i}. {c['title']}{RESET}")
+        print(f"{GREEN}b. ...{RESET}")
+    while True:
+        choice = input(f"{CYAN}Select conversation: {RESET}").strip().lower()
+        if choice == 'b':
+            return 'back', None, None, None
+        if choice == '0':
+            return None, [], [], None
+        if choice.isdigit() and 1 <= int(choice) <= len(convs):
+            file = convs[int(choice) - 1]['file']
+            messages, history, context = load_conversation(model, file)
+            return file, messages, history, context
+        print(f"{RED}Invalid selection{RESET}")
+
+def chat_loop(model, conv_file, messages=None, history=None, context=None):
     global SERVER_URL, selected_server, selected_api
     redraw_ui(model)
     if messages is None:
@@ -416,6 +480,8 @@ def chat_loop(model, messages=None, history=None, context=None):
                     print(f"{YELLOW}Nickname saved{RESET}")
                 redraw_ui(model)
                 continue
+            if conv_file is None:
+                conv_file = create_conversation_file(model, user_input)
 
             print(f"{AI_COLOR}\U0001f5a5️ : thinking...", end='', flush=True)
             headers = api_headers()
@@ -521,7 +587,7 @@ def chat_loop(model, messages=None, history=None, context=None):
             messages.append({"role": "user", "content": user_input})
             messages.append({"role": "assistant", "content": resp})
             history.append({"user": user_input, "ai": resp})
-            save_conversation(model, messages, context)
+            save_conversation(model, conv_file, messages, context)
 
     except KeyboardInterrupt:
         print(f"{YELLOW}Session interrupted{RESET}")
@@ -576,25 +642,25 @@ if __name__ == "__main__":
             continue
 
         # 3. Pick a model
-        chosen = select_model(models)
+        while True:
+            chosen = select_model(models)
+            if chosen is None:
+                break  # back to server selection
 
-        messages = []
-        history = []
-        context = None
-        path = conv_path(chosen)
-        if os.path.exists(path):
-            ans = input(f"{CYAN}Resume previous conversation? (y/n): {RESET}").strip().lower()
-            if ans == 'y':
-                messages, history, context = load_conversation(chosen)
+            # 4. Pick or start conversation
+            while True:
+                conv_file, messages, history, context = select_conversation(chosen)
+                if conv_file == 'back':
+                    break  # back to model selection
+
+                result = chat_loop(chosen, conv_file, messages, history, context)
+                if result == 'back':
+                    continue  # back to conversation selection
+                elif result == 'exit':
+                    sys.exit(0)
+                else:
+                    sys.exit(0)
+            if conv_file == 'back':
+                continue  # select model again
             else:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-
-        # 4. Chat loop
-        result = chat_loop(chosen, messages, history, context)
-        if result == "back":
-            continue  # <-- Go back to server selection, not model
-        else:
-            break
+                break
