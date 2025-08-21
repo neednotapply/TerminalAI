@@ -2,7 +2,6 @@ import requests
 import time
 import datetime
 import os
-import random
 import sys
 import shutil
 import pandas as pd
@@ -11,6 +10,7 @@ import json
 import re
 import threading
 import socket
+from rain import rain
 
 if os.name == "nt":
     import msvcrt
@@ -243,91 +243,13 @@ def redraw_ui(model):
 def display_connecting_box(x, y, w, h):
     for i in range(h):
         print(f"\033[{y+i};{x}H{' '*w}{RESET}")
+    sys.stdout.flush()
     msg = "HACK THE PLANET"
     mx = x + (w - len(msg)) // 2
     my = y + h // 2
-    print(f"\033[{my};{mx}H\033[1;32m", end="")
-    for char in msg:
-        print(char, end="", flush=True)
-        time.sleep(0.08)
+    print(f"\033[{my};{mx}H\033[1;32m{msg}{RESET}", flush=True)
     time.sleep(1.5)
 
-def rain(
-    persistent=False,
-    duration=3,
-    stop_event=None,
-    box_top=None,
-    box_bottom=None,
-    box_left=None,
-    box_right=None,
-):
-    charset = (
-        "01$#*+=-░▒▓▌▐▄▀▁▂▃▅▆▇█ﾊﾐﾋｰｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ""01$#*+=-"
-    )
-    try:
-        print("\033[?25l", end="")
-        os.system("cls" if os.name == "nt" else "clear")
-        end_time = time.time() + duration if not persistent else None
-        columns, rows = shutil.get_terminal_size(fallback=(80, 24))
-        trail_length = 6
-        drops = [random.randint(0, rows) for _ in range(columns)]
-        if os.name != "nt":
-            fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
-            tty.setcbreak(fd)
-        while (persistent or time.time() < end_time) and (
-            stop_event is None or not stop_event.is_set()
-        ):
-            for col in range(columns):
-                drop_pos = drops[col]
-                for t in range(trail_length):
-                    y = drop_pos - t
-                    if 0 < y < rows:
-                        if (
-                            box_top is not None
-                            and box_bottom is not None
-                            and box_left is not None
-                            and box_right is not None
-                            and box_top <= y <= box_bottom
-                            and box_left <= col + 1 <= box_right
-                        ):
-                            continue
-                        char = random.choice(charset) if t < 4 else " "
-                        shade = (
-                            "\033[92m"
-                            if t == 0
-                            else "\033[32m"
-                            if t == 1
-                            else "\033[32;2m"
-                            if t == 2
-                            else "\033[2;32m"
-                            if t == 3
-                            else ""
-                        )
-                        print(
-                            f"\033[{y};{col+1}H{shade}{char}{RESET}",
-                            end="",
-                        )
-                drops[col] = (drops[col] + 1) % (rows + trail_length)
-            sys.stdout.flush()
-            time.sleep(0.08)
-            if stop_event is not None and stop_event.is_set():
-                break
-            if persistent and (stop_event is None or not stop_event.is_set()):
-                if os.name == "nt":
-                    if msvcrt.kbhit():
-                        msvcrt.getch()
-                        break
-                else:
-                    dr, _, _ = select.select([sys.stdin], [], [], 0)
-                    if dr:
-                        os.read(sys.stdin.fileno(), 1)
-                        break
-    finally:
-        if os.name != "nt":
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        time.sleep(0.5)
-        print("\033[0m\033[2J\033[H\033[?25h", end="")
 
 def render_markdown(text):
     lines = text.splitlines()

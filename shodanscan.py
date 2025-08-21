@@ -143,7 +143,7 @@ def update_existing(api, df, batch_size):
             df.at[idx, "last_check_date"] = now
         latency = ping_time(ip, port)
         if latency is None:
-            df.at[idx, "ping"] = ""
+            df.at[idx, "ping"] = pd.NA
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = "ping timeout"
         else:
@@ -193,7 +193,7 @@ def find_new(api, df, limit):
                 "country": country,
                 "latitude": location.get("latitude", ""),
                 "longitude": location.get("longitude", ""),
-                "ping": "",
+                "ping": pd.NA,
             })
             existing.add((ip, str(port)))
             count += 1
@@ -203,13 +203,14 @@ def find_new(api, df, limit):
         for idx, row in new_df.iterrows():
             latency = ping_time(row["ip"], row["port"])
             if latency is None:
-                new_df.at[idx, "ping"] = ""
+                new_df.at[idx, "ping"] = pd.NA
                 new_df.at[idx, "is_active"] = False
                 new_df.at[idx, "inactive_reason"] = "ping timeout"
             else:
                 new_df.at[idx, "ping"] = latency
                 new_df.at[idx, "is_active"] = True
                 new_df.at[idx, "inactive_reason"] = ""
+        new_df["ping"] = pd.to_numeric(new_df["ping"], errors="coerce")
         new_df.sort_values(by="ping", inplace=True, na_position="last")
         new_df = new_df.head(limit)
         if df.empty:
@@ -258,6 +259,7 @@ def main():
     for col in COLUMNS:
         if col not in df.columns:
             df[col] = ""
+    df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
 
     logging.info("Updating existing endpoints")
     oldest_idx = (
@@ -275,6 +277,7 @@ def main():
     logging.info("Finished searching for new endpoints")
 
     df = df[COLUMNS]
+    df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
     df.to_csv(CSV_PATH, index=False)
 
 
