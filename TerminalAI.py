@@ -48,7 +48,7 @@ def start_thinking_timer():
         while not stop_event.is_set():
             elapsed = int(time.time() - start)
             print(
-                f"\r{AI_COLOR}\U0001f5a5️ : thinking... ({elapsed}s){RESET}",
+                f"\r{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){RESET}",
                 end="",
                 flush=True,
             )
@@ -63,7 +63,7 @@ def stop_thinking_timer(start, stop_event, timed_out=False):
     elapsed = int(time.time() - start)
     status = " [Timed out]" if timed_out else ""
     print(
-        f"\r{AI_COLOR}\U0001f5a5️ : thinking... ({elapsed}s){status}{RESET}"
+        f"\r{AI_COLOR}\U0001f5a5️ : TFhinking... ({elapsed}s){status}{RESET}"
     )
     return elapsed
 
@@ -330,8 +330,8 @@ def redraw_ui(model):
     os.system("cls" if os.name == "nt" else "clear")
     ip = selected_server['ip']
     port = selected_server['apis'][selected_api]
-    print(f"{BOLD}{GREEN}AI Terminal Interface 🖥️ | {ip}:{port}{RESET}")
-    print(f"{GREEN}Active Model: {model} | {selected_server['nickname']}{RESET}")
+    print(f"{BOLD}{GREEN}🖥️ AI Terminal Interface | Active Model: {model}{RESET}")
+    print(f"{GREEN}{ip}:{port} | {selected_server['nickname']}{RESET}")
     print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick (Esc=Back){RESET}")
 
 def display_connecting_box(x, y, w, h):
@@ -352,7 +352,7 @@ def render_markdown(text):
     for ln in lines:
         s = ln.strip()
         if s.startswith("<think>"):
-            print(f"{YELLOW}{BOLD}🧠 Thinking...{RESET}")
+            print(f"{YELLOW}{BOLD} Thinking...{RESET}")
             in_think = True
             continue
         if s.endswith("</think>"):
