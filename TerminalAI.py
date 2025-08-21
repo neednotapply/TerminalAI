@@ -83,6 +83,10 @@ def get_input(prompt):
                     buf = buf[:-1]
                     sys.stdout.write("\b \b")
                     sys.stdout.flush()
+            elif ch in ("\x00", "\xe0"):
+                # Consume special keys like arrows without affecting input
+                msvcrt.getwch()
+                continue
             elif ch == "\x1b":
                 print()
                 return "ESC"
@@ -111,6 +115,15 @@ def get_input(prompt):
                             sys.stdout.write("\b \b")
                             sys.stdout.flush()
                     elif ch == "\x1b":
+                        # Ignore arrow key escape sequences but handle standalone ESC
+                        if select.select([sys.stdin], [], [], 0.01)[0]:
+                            ch2 = sys.stdin.read(1)
+                            if ch2 == "[":
+                                # consume the rest of the sequence (e.g., arrow keys)
+                                while select.select([sys.stdin], [], [], 0.01)[0]:
+                                    sys.stdin.read(1)
+                                continue
+                            # not an arrow sequence; treat as ESC key
                         print()
                         return "ESC"
                     else:
@@ -660,10 +673,11 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
 if __name__ == "__main__":
     selected_api = 'ollama'
 
+    os.system("cls" if os.name == "nt" else "clear")
     cols, rows = shutil.get_terminal_size(fallback=(80, 24))
     box_w, box_h = 30, 5
-    box_x = (cols - box_w) // 2
-    box_y = (rows - box_h) // 2
+    box_x = (cols - box_w) // 2 + 1
+    box_y = (rows - box_h) // 2 + 1
     stop_rain = threading.Event()
     rain_thread = threading.Thread(
         target=rain,
@@ -674,6 +688,7 @@ if __name__ == "__main__":
             "box_bottom": box_y + box_h - 1,
             "box_left": box_x,
             "box_right": box_x + box_w - 1,
+            "clear_screen": False,
         },
     )
     rain_thread.start()
