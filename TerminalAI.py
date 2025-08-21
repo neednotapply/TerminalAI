@@ -8,6 +8,7 @@ import shutil
 import pandas as pd
 import select
 import json
+import re
 import threading
 import socket
 
@@ -57,7 +58,7 @@ def load_servers():
     df = df[df["is_active"] & (df["api_type"] == "ollama")]
     df = df.sort_values("ping")
     servers = []
-    for ip, group in df.groupby("ip"):
+    for ip, group in df.groupby("ip", sort=False):
         apis = {row["api_type"]: row["port"] for _, row in group.iterrows()}
         nickname = group.iloc[0]["nickname"]
         country = group.iloc[0].get("country", "")
@@ -77,7 +78,7 @@ def persist_nickname(server, new_nick):
         print(f"{RED}Failed to persist nickname: {e}{RESET}")
 
 def conv_path(model):
-    safe = model.replace("/", "_")
+    safe = re.sub(r'[\\/:*?"<>|]', '_', model)
     os.makedirs(CONV_DIR, exist_ok=True)
     return os.path.join(CONV_DIR, f"{safe}.json")
 
@@ -211,7 +212,7 @@ def display_connecting_box():
     time.sleep(1.5)
     print(RESET+"\033[?25h")
 
-def matrix_rain(persistent=False, duration=3):
+def matrix_rain(persistent=False, duration=3, stop_event=None):
     charset = "01$#*+=-░▒▓▌▐▄▀▁▂▃▅▆▇█ﾊﾐﾋｰｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ""01$#*+=-"
     try:
         print("\033[?25l", end='')
@@ -224,7 +225,9 @@ def matrix_rain(persistent=False, duration=3):
             fd = sys.stdin.fileno()
             old_settings = termios.tcgetattr(fd)
             tty.setcbreak(fd)
-        while persistent or time.time() < end_time:
+        while (persistent or time.time() < end_time) and (
+            stop_event is None or not stop_event.is_set()
+        ):
             for col in range(columns):
                 drop_pos = drops[col]
                 for t in range(trail_length):
@@ -245,7 +248,9 @@ def matrix_rain(persistent=False, duration=3):
                 drops[col] = (drops[col] + 1) % (rows + trail_length)
             sys.stdout.flush()
             time.sleep(0.08)
-            if persistent:
+            if stop_event is not None and stop_event.is_set():
+                break
+            if persistent and (stop_event is None or not stop_event.is_set()):
                 if os.name == "nt":
                     if msvcrt.kbhit():
                         msvcrt.getch()
@@ -538,8 +543,14 @@ if __name__ == "__main__":
     display_connecting_box()
     ping_thread = threading.Thread(target=update_pings, daemon=True)
     ping_thread.start()
-    matrix_rain(duration=10)
+    stop_rain = threading.Event()
+    rain_thread = threading.Thread(
+        target=matrix_rain, kwargs={"persistent": True, "stop_event": stop_rain}
+    )
+    rain_thread.start()
     ping_thread.join()
+    stop_rain.set()
+    rain_thread.join()
 
     while True:
         # 1. Load and pick a server

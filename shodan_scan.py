@@ -208,7 +208,10 @@ def find_new(api, df, limit):
                 new_df.at[idx, "ping"] = latency
                 new_df.at[idx, "is_active"] = True
                 new_df.at[idx, "inactive_reason"] = ""
-        df = pd.concat([df, new_df], ignore_index=True)
+        if df.empty:
+            df = new_df
+        else:
+            df = pd.concat([df, new_df], ignore_index=True)
     return df
 
 
