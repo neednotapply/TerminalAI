@@ -1,6 +1,20 @@
 Basic script to converse with Ollama endpoints.
 "endpoints.csv" needs to be populated with valid Ollama endpoints.
 
+Conversations are stored per model in the `conversations` directory. After
+selecting a model you can resume a previous chat if one exists or start a new
+session. Requests to chat-style endpoints still resend the full message history
+and the request timeout grows with conversation length. When the lower-level
+`/api/generate` endpoint is used, the script instead persists and sends the
+token `context` returned by the API so only the latest prompt is transmitted.
+
+At launch the program pings all known servers in the background while the
+"rain" animation plays. Hosts are sorted by ping time and any that fail to
+respond are marked inactive and omitted from the selection list.
+
+Logs produced by the `/print` command or when saving on exit are written under
+the `logs` directory, which is created automatically if needed.
+
 ## Automatic population
 
 The `shodan_scan.py` helper uses the [Shodan](https://www.shodan.io/) API to
@@ -12,6 +26,10 @@ keep `endpoints.csv` up to date. It performs two tasks:
 
 By default the script looks for hosts on the standard Ollama port (11434)
 whose HTTP response contains the text "Ollama is running".
+
+As part of the scan each server is also pinged locally. The round-trip time is
+stored in the `ping` column and any host that does not answer is marked
+inactive.
 
 Create a `config.json` next to `shodan_scan.py` with your API key. A
 `config.example.json` template is provided:

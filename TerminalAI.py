@@ -7,6 +7,10 @@ import sys
 import shutil
 import pandas as pd
 import select
+import json
+import subprocess
+import re
+import threading
 
 if os.name == "nt":
     import msvcrt
@@ -29,6 +33,8 @@ selected_api = None
 IDLE_TIMEOUT = 30
 REQUEST_TIMEOUT = 60
 CSV_PATH = "endpoints.csv"
+CONV_DIR = "conversations"
+LOG_DIR = "logs"
 
 def api_headers():
     return {"Content-Type": "application/json"}
@@ -48,13 +54,16 @@ def load_servers():
     df["port"] = df["port"].astype(int)
     df["is_active"] = df["is_active"].astype(bool)
     df["api_type"] = df["api_type"].str.lower()
+    df["ping"] = pd.to_numeric(df.get("ping"), errors="coerce").fillna(float("inf"))
     df = df[df["is_active"] & (df["api_type"] == "ollama")]
+    df = df.sort_values("ping")
     servers = []
     for ip, group in df.groupby("ip"):
         apis = {row["api_type"]: row["port"] for _, row in group.iterrows()}
         nickname = group.iloc[0]["nickname"]
         country = group.iloc[0].get("country", "")
-        servers.append({"ip": ip, "nickname": nickname, "apis": apis, "country": country})
+        ping_val = group.iloc[0]["ping"]
+        servers.append({"ip": ip, "nickname": nickname, "apis": apis, "country": country, "ping": ping_val})
     return servers
 
 def persist_nickname(server, new_nick):
@@ -68,10 +77,85 @@ def persist_nickname(server, new_nick):
     except Exception as e:
         print(f"{RED}Failed to persist nickname: {e}{RESET}")
 
+def conv_path(model):
+    safe = model.replace("/", "_")
+    os.makedirs(CONV_DIR, exist_ok=True)
+    return os.path.join(CONV_DIR, f"{safe}.json")
+
+def load_conversation(model):
+    path = conv_path(model)
+    messages = []
+    context = None
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                messages = data.get("messages", [])
+                context = data.get("context")
+            else:
+                messages = data
+        except Exception:
+            messages = []
+            context = None
+    history = []
+    for i in range(0, len(messages), 2):
+        user = messages[i].get("content", "") if i < len(messages) else ""
+        ai = messages[i + 1].get("content", "") if i + 1 < len(messages) else ""
+        history.append({"user": user, "ai": ai})
+    return messages, history, context
+
+def save_conversation(model, messages, context=None):
+    path = conv_path(model)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"messages": messages, "context": context}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"{RED}Failed to save conversation: {e}{RESET}")
+
+
+def ping_time(ip):
+    try:
+        if os.name == "nt":
+            cmd = ["ping", "-n", "1", "-w", "1000", ip]
+        else:
+            cmd = ["ping", "-c", "1", "-W", "1", ip]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            m = re.search(r"time[=<]([0-9.]+) ms", res.stdout)
+            if m:
+                return float(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def update_pings():
+    try:
+        df = pd.read_csv(CSV_PATH, keep_default_na=False)
+    except Exception:
+        return
+    if "ping" not in df.columns:
+        df["ping"] = ""
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    for idx, row in df.iterrows():
+        latency = ping_time(row["ip"])
+        if latency is None:
+            df.at[idx, "ping"] = ""
+            df.at[idx, "is_active"] = False
+            df.at[idx, "inactive_reason"] = "ping timeout"
+        else:
+            df.at[idx, "ping"] = latency
+            df.at[idx, "is_active"] = True
+            df.at[idx, "inactive_reason"] = ""
+        df.at[idx, "last_check_date"] = now
+    df.to_csv(CSV_PATH, index=False)
+
 def select_server(servers):
     print(f"{CYAN}Available Servers:{RESET}")
     for i, s in enumerate(servers, 1):
-        print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}){RESET}")
+        ping = "?" if s.get("ping", float("inf")) == float("inf") else f"{s['ping']:.1f} ms"
+        print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}) - {ping}{RESET}")
     while True:
         c = input(f"{CYAN}Select server: {RESET}").strip()
         if c.isdigit() and 1 <= int(c) <= len(servers):
@@ -214,10 +298,15 @@ def reprint_history(history):
         print(f"{AI_COLOR}🖥️ : ",end='')
         render_markdown(e['ai'])
 
-def chat_loop(model):
+def chat_loop(model, messages=None, history=None, context=None):
     global SERVER_URL, selected_server, selected_api
     redraw_ui(model)
-    history = []
+    if messages is None:
+        messages = []
+    if history is None:
+        history = []
+    if history:
+        reprint_history(history)
     try:
         while True:
             start = time.time()
@@ -298,7 +387,8 @@ def chat_loop(model):
             elif cmd == "/print":
                 if history:
                     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    fn = f"chat_{ts}.txt"
+                    os.makedirs(LOG_DIR, exist_ok=True)
+                    fn = os.path.join(LOG_DIR, f"chat_{ts}.txt")
                     with open(fn, "w", encoding="utf-8") as f:
                         for h in history:
                             f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
@@ -332,6 +422,7 @@ def chat_loop(model):
             headers = api_headers()
             resp = None
             server_failed = False
+            timeout_val = REQUEST_TIMEOUT + (len(messages) // 2) * 5
 
             chat_paths = ["/v1/chat/completions"]
             if selected_api == "ollama":
@@ -339,11 +430,16 @@ def chat_loop(model):
 
             for p in chat_paths:
                 try:
+                    payload = {
+                        "model": model,
+                        "messages": messages + [{"role": "user", "content": user_input}],
+                        "stream": False,
+                    }
                     r = requests.post(
                         f"{SERVER_URL}{p}",
                         headers=headers,
-                        json={"model": model, "messages": [{"role": "user", "content": user_input}], "stream": False},
-                        timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+                        json=payload,
+                        timeout=(timeout_val, timeout_val),
                     )
                     r.raise_for_status()
                     data = r.json()
@@ -356,7 +452,7 @@ def chat_loop(model):
                         resp = msg
                         break
                 except requests.exceptions.Timeout:
-                    print(f"\n{RED}{p} request timed out after {REQUEST_TIMEOUT}s{RESET}")
+                    print(f"\n{RED}{p} request timed out after {timeout_val}s{RESET}")
                     server_failed = True
                     break
                 except requests.exceptions.RequestException as e:
@@ -370,20 +466,35 @@ def chat_loop(model):
                     gen.append("/api/generate")
                 for p in gen:
                     try:
+                        if p == "/api/generate":
+                            payload = {"model": model, "prompt": user_input, "stream": False}
+                            if context:
+                                payload["context"] = context
+                        else:
+                            prompt_text = "\n".join([
+                                f"{m['role']}: {m['content']}" for m in messages + [{"role": "user", "content": user_input}]
+                            ])
+                            payload = {"model": model, "prompt": prompt_text, "stream": False}
                         r = requests.post(
                             f"{SERVER_URL}{p}",
                             headers=headers,
-                            json={"model": model, "prompt": user_input, "stream": False},
-                            timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+                            json=payload,
+                            timeout=(timeout_val, timeout_val),
                         )
                         r.raise_for_status()
                         data = r.json()
-                        msg = data.get("choices", [{}])[0].get("text") or data.get("completion")
+                        msg = (
+                            data.get("choices", [{}])[0].get("text")
+                            or data.get("completion")
+                            or data.get("response")
+                        )
                         if msg:
                             resp = msg
+                            if "context" in data:
+                                context = data.get("context")
                             break
                     except requests.exceptions.Timeout:
-                        print(f"\n{RED}{p} request timed out after {REQUEST_TIMEOUT}s{RESET}")
+                        print(f"\n{RED}{p} request timed out after {timeout_val}s{RESET}")
                         server_failed = True
                         break
                     except requests.exceptions.RequestException as e:
@@ -408,7 +519,10 @@ def chat_loop(model):
             print("\r\033[K", end='')
             print(f"{AI_COLOR}\U0001f5a5️ : ", end='')
             render_markdown(resp)
+            messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "assistant", "content": resp})
             history.append({"user": user_input, "ai": resp})
+            save_conversation(model, messages, context)
 
     except KeyboardInterrupt:
         print(f"{YELLOW}Session interrupted{RESET}")
@@ -416,7 +530,8 @@ def chat_loop(model):
             save = input(f"{CYAN}Save log? (y/n): {RESET}").lower()
             if save == "y":
                 ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                fn = f"chat_{ts}.txt"
+                os.makedirs(LOG_DIR, exist_ok=True)
+                fn = os.path.join(LOG_DIR, f"chat_{ts}.txt")
                 with open(fn, "w", encoding="utf-8") as f:
                     for h in history:
                         f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
@@ -427,7 +542,10 @@ if __name__ == "__main__":
     selected_api = 'ollama'
 
     display_connecting_box()
+    ping_thread = threading.Thread(target=update_pings, daemon=True)
+    ping_thread.start()
     matrix_rain(duration=10)
+    ping_thread.join()
 
     while True:
         # 1. Load and pick a server
@@ -455,8 +573,22 @@ if __name__ == "__main__":
         # 3. Pick a model
         chosen = select_model(models)
 
+        messages = []
+        history = []
+        context = None
+        path = conv_path(chosen)
+        if os.path.exists(path):
+            ans = input(f"{CYAN}Resume previous conversation? (y/n): {RESET}").strip().lower()
+            if ans == 'y':
+                messages, history, context = load_conversation(chosen)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
         # 4. Chat loop
-        result = chat_loop(chosen)
+        result = chat_loop(chosen, messages, history, context)
         if result == "back":
             continue  # <-- Go back to server selection, not model
         else:
