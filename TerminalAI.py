@@ -195,13 +195,13 @@ def select_server(servers):
 
 def select_model(models):
     print(f"{CYAN}Available Models:{RESET}")
-    print(f"{GREEN}b. ...{RESET}")
+    print(f"{GREEN}0. Back{RESET}")
     for i, model in enumerate(models, 1):
         mark = " *" if has_conversations(model) else ""
         print(f"{GREEN}{i}. {model}{mark}{RESET}")
     while True:
-        c = input(f"{CYAN}Select model: {RESET}").strip().lower()
-        if c == 'b':
+        c = input(f"{CYAN}Select model: {RESET}").strip()
+        if c == '0':
             return None
         if c.isdigit() and 1 <= int(c) <= len(models):
             return models[int(c) - 1]
@@ -341,22 +341,22 @@ def select_conversation(model):
     convs = list_conversations(model)
     if not convs:
         print(f"{CYAN}No previous conversations found.{RESET}")
-        print(f"{GREEN}0. Start new conversation{RESET}")
-        print(f"{GREEN}b. ...{RESET}")
-    else:
-        print(f"{CYAN}Conversations:{RESET}")
-        print(f"{GREEN}0. Start new conversation{RESET}")
-        for i, c in enumerate(convs, 1):
-            print(f"{GREEN}{i}. {c['title']}{RESET}")
-        print(f"{GREEN}b. ...{RESET}")
+        return None, [], [], None
+
+    print(f"{CYAN}Conversations:{RESET}")
+    print(f"{GREEN}1. Start new conversation{RESET}")
+    for i, c in enumerate(convs, 2):
+        print(f"{GREEN}{i}. {c['title']}{RESET}")
+    print(f"{GREEN}0. Back{RESET}")
+
     while True:
-        choice = input(f"{CYAN}Select conversation: {RESET}").strip().lower()
-        if choice == 'b':
-            return 'back', None, None, None
+        choice = input(f"{CYAN}Select conversation: {RESET}").strip()
         if choice == '0':
+            return 'back', None, None, None
+        if choice == '1':
             return None, [], [], None
-        if choice.isdigit() and 1 <= int(choice) <= len(convs):
-            file = convs[int(choice) - 1]['file']
+        if choice.isdigit() and 2 <= int(choice) < len(convs) + 2:
+            file = convs[int(choice) - 2]['file']
             messages, history, context = load_conversation(model, file)
             return file, messages, history, context
         print(f"{RED}Invalid selection{RESET}")
@@ -579,7 +579,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     print(f"{RED}Server marked inactive due to failure{RESET}")
                 except Exception as ex:
                     print(f"{RED}Failed to update CSV: {ex}{RESET}")
-                return "back"
+                return "server_inactive"
 
             print("\r\033[K", end='')
             print(f"{AI_COLOR}\U0001f5a5️ : ", end='')
@@ -656,11 +656,16 @@ if __name__ == "__main__":
                 result = chat_loop(chosen, conv_file, messages, history, context)
                 if result == 'back':
                     continue  # back to conversation selection
+                elif result == 'server_inactive':
+                    conv_file = 'server_inactive'
+                    break
                 elif result == 'exit':
                     sys.exit(0)
                 else:
                     sys.exit(0)
             if conv_file == 'back':
                 continue  # select model again
+            elif conv_file == 'server_inactive':
+                break  # back to server selection
             else:
                 break
