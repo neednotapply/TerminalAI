@@ -14,6 +14,9 @@ COLS=$(tput cols)
 HEADER_HEIGHT=6
 HEADER_TOP=0
 HEADER_BOTTOM=$((HEADER_TOP + HEADER_HEIGHT - 1))
+HEADER_WIDTH=76
+HEADER_LEFT=$(((COLS - HEADER_WIDTH) / 2))
+HEADER_RIGHT=$((HEADER_LEFT + HEADER_WIDTH - 1))
 
 BOX_WIDTH=34
 BOX_HEIGHT=4
@@ -24,19 +27,18 @@ BOX_BOTTOM=$((BOX_TOP + BOX_HEIGHT - 1))
 PROMPT_ROW=$((BOX_BOTTOM + 1))
 
 draw_header() {
-  local start_col=$(((COLS - 68) / 2))
-  tput cup $HEADER_TOP $start_col
-  printf "${BOLD}${GREEN}████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗\n"
-  tput cup $((HEADER_TOP+1)) $start_col
-  printf "╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║\n"
-  tput cup $((HEADER_TOP+2)) $start_col
-  printf "   ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║\n"
-  tput cup $((HEADER_TOP+3)) $start_col
-  printf "   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║\n"
-  tput cup $((HEADER_TOP+4)) $start_col
-  printf "   ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗\n"
-  tput cup $((HEADER_TOP+5)) $start_col
-  printf "   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝${RESET}"
+  tput cup $HEADER_TOP $HEADER_LEFT
+  printf "${BOLD}${GREEN}████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗      █████╗ ██╗\n"
+  tput cup $((HEADER_TOP+1)) $HEADER_LEFT
+  printf "╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║     ██╔══██╗██║\n"
+  tput cup $((HEADER_TOP+2)) $HEADER_LEFT
+  printf "   ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║     ███████║██║\n"
+  tput cup $((HEADER_TOP+3)) $HEADER_LEFT
+  printf "   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║     ██╔══██║██║\n"
+  tput cup $((HEADER_TOP+4)) $HEADER_LEFT
+  printf "   ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗██║  ██║██║\n"
+  tput cup $((HEADER_TOP+5)) $HEADER_LEFT
+  printf "   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝${RESET}"
 }
 
 draw_box() {
@@ -67,9 +69,9 @@ draw_header
 draw_box
 print_options
 
-python rain.py --header-top "$HEADER_TOP" --header-bottom "$HEADER_BOTTOM" \
-  --box-top "$BOX_TOP" --box-bottom "$BOX_BOTTOM" --box-left "$BOX_LEFT" \
-  --box-right "$BOX_RIGHT" --prompt-row "$PROMPT_ROW" &
+python rain.py --persistent \
+  --exclude "$HEADER_TOP,$HEADER_BOTTOM,$HEADER_LEFT,$HEADER_RIGHT" \
+  --exclude "$BOX_TOP,$BOX_BOTTOM,$BOX_LEFT,$BOX_RIGHT" &
 R_PID=$!
 
 cleanup() {
