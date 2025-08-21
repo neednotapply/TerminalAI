@@ -45,8 +45,8 @@ REQUEST_TIMEOUT = 60
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CSV_PATH = DATA_DIR / "endpoints.csv"
-CONV_DIR = BASE_DIR / "conversations"
-LOG_DIR = BASE_DIR / "logs"
+CONV_DIR = DATA_DIR / "conversations"
+LOG_DIR = DATA_DIR / "logs"
 
 def api_headers():
     return {"Content-Type": "application/json"}
@@ -515,7 +515,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             elif cmd == "/print":
                 if history:
                     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    LOG_DIR.mkdir(exist_ok=True)
+                    LOG_DIR.mkdir(parents=True, exist_ok=True)
                     fn = LOG_DIR / f"chat_{ts}.txt"
                     with fn.open("w", encoding="utf-8") as f:
                         for h in history:
@@ -682,7 +682,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             save = input(f"{CYAN}Save log? (y/n): {RESET}").lower()
             if save == "y":
                 ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                LOG_DIR.mkdir(exist_ok=True)
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
                 fn = LOG_DIR / f"chat_{ts}.txt"
                 with fn.open("w", encoding="utf-8") as f:
                     for h in history:

@@ -5,7 +5,7 @@ Use `launcher.sh` (Linux/macOS) or `launcher.bat` (Windows) for a retro
 ANSI menu that lets you choose between scanning Shodan and starting the
 TerminalAI chat client.
 
-Conversations are stored per model in the `conversations` directory. After
+Conversations are stored per model in `data/conversations`. After
 selecting a model you can resume a previous chat if one exists or start a new
 session. Requests to chat-style endpoints still resend the full message history
 and the request timeout grows with conversation length. When the lower-level
@@ -17,7 +17,7 @@ At launch the program pings all known servers in the background while the
 respond are marked inactive and omitted from the selection list.
 
 Logs produced by the `/print` command or when saving on exit are written under
-the `logs` directory, which is created automatically if needed.
+the `data/logs` directory, which is created automatically if needed.
 
 ## Automatic population
 
