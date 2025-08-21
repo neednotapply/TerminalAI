@@ -28,6 +28,12 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 AI_COLOR = "\033[32m"
 
+VERBOSE = "--verbose" in sys.argv
+
+def clear_screen(force=False):
+    if not VERBOSE or force:
+        os.system("cls" if os.name == "nt" else "clear")
+
 def heat_color(ping):
     if ping is None or ping == float("inf"):
         return RED
@@ -303,7 +309,13 @@ def select_server(servers):
         ping_col = f"{color}{ping_str}{RESET}"
         print(f"{GREEN}{i}. {s['nickname']}{RESET} ({ip_col}) - {ping_col}")
     while True:
-        c = input(f"{CYAN}Select server: {RESET}").strip()
+        c = get_input(f"{CYAN}Select server: {RESET}")
+        if c == "ESC":
+            confirm = get_input(f"{CYAN}Exit? y/n: {RESET}")
+            if confirm.lower() == "y":
+                sys.exit(0)
+            else:
+                continue
         if c.isdigit() and 1 <= int(c) <= len(servers):
             return servers[int(c) - 1]
         print(f"{RED}Invalid selection{RESET}")
@@ -343,7 +355,7 @@ def build_url(server, api):
     return f"http://{server['ip']}:{server['apis'][api]}"
 
 def redraw_ui(model):
-    os.system("cls" if os.name == "nt" else "clear")
+    clear_screen()
     ip = selected_server['ip']
     port = selected_server['apis'][selected_api]
     print(f"{BOLD}{GREEN}🖥️ AI Terminal Interface | Active Model: {model}{RESET}")
@@ -438,11 +450,12 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             if os.name == "nt":
                 while True:
                     if time.time() - start > IDLE_TIMEOUT:
-                        rain(persistent=True)
-                        redraw_ui(model)
-                        reprint_history(history)
-                        sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
-                        sys.stdout.flush()
+                        if not VERBOSE:
+                            rain(persistent=True)
+                            redraw_ui(model)
+                            reprint_history(history)
+                            sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
+                            sys.stdout.flush()
                         start = time.time()
                     if msvcrt.kbhit():
                         ch = msvcrt.getwch()
@@ -474,12 +487,13 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 try:
                     while True:
                         if time.time() - start > IDLE_TIMEOUT:
-                            rain(persistent=True)
-                            redraw_ui(model)
-                            reprint_history(history)
-                            sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
-                            sys.stdout.flush()
-                            tty.setcbreak(fd)
+                            if not VERBOSE:
+                                rain(persistent=True)
+                                redraw_ui(model)
+                                reprint_history(history)
+                                sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
+                                sys.stdout.flush()
+                                tty.setcbreak(fd)
                             start = time.time()
                         rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
                         if rlist:
@@ -510,6 +524,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             if cmd == "/exit":
                 return "exit"
             elif cmd == "/clear":
+                clear_screen(force=True)
                 redraw_ui(model)
                 continue
             elif cmd == "/print":
@@ -693,35 +708,38 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
 if __name__ == "__main__":
     selected_api = 'ollama'
 
-    os.system("cls" if os.name == "nt" else "clear")
-    cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-    box_w, box_h = 30, 5
-    box_x = (cols - box_w) // 2 + 1
-    box_y = (rows - box_h) // 2 + 1
-    stop_rain = threading.Event()
-    rain_thread = threading.Thread(
-        target=rain,
-        kwargs={
-            "persistent": True,
-            "stop_event": stop_rain,
-            "box_top": box_y,
-            "box_bottom": box_y + box_h - 1,
-            "box_left": box_x,
-            "box_right": box_x + box_w - 1,
-            "clear_screen": False,
-        },
-    )
-    rain_thread.start()
-    display_connecting_box(box_x, box_y, box_w, box_h)
-    ping_thread = threading.Thread(target=update_pings, daemon=True)
-    ping_thread.start()
-    ping_thread.join()
-    stop_rain.set()
-    rain_thread.join()
-    os.system("cls" if os.name == "nt" else "clear")
+    if not VERBOSE:
+        clear_screen()
+        cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+        box_w, box_h = 30, 5
+        box_x = (cols - box_w) // 2 + 1
+        box_y = (rows - box_h) // 2 + 1
+        stop_rain = threading.Event()
+        rain_thread = threading.Thread(
+            target=rain,
+            kwargs={
+                "persistent": True,
+                "stop_event": stop_rain,
+                "box_top": box_y,
+                "box_bottom": box_y + box_h - 1,
+                "box_left": box_x,
+                "box_right": box_x + box_w - 1,
+                "clear_screen": False,
+            },
+        )
+        rain_thread.start()
+        display_connecting_box(box_x, box_y, box_w, box_h)
+        ping_thread = threading.Thread(target=update_pings, daemon=True)
+        ping_thread.start()
+        ping_thread.join()
+        stop_rain.set()
+        rain_thread.join()
+        clear_screen()
+    else:
+        update_pings()
 
     while True:
-        os.system("cls" if os.name == "nt" else "clear")
+        clear_screen()
         # 1. Load and pick a server
         servers = load_servers()
         srv_list = [s for s in servers if selected_api in s["apis"]]
@@ -730,6 +748,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         selected_server = select_server(srv_list)
+        clear_screen()
         SERVER_URL = build_url(selected_server, selected_api)
 
         # 2. Fetch models
@@ -748,8 +767,9 @@ if __name__ == "__main__":
         while True:
             chosen = select_model(models)
             if chosen is None:
-                os.system("cls" if os.name == "nt" else "clear")
+                clear_screen()
                 break  # back to server selection
+            clear_screen()
 
             # 4. Pick or start conversation
             while True:
@@ -763,7 +783,7 @@ if __name__ == "__main__":
 
                 result = chat_loop(chosen, conv_file, messages, history, context)
                 if result == 'back':
-                    os.system("cls" if os.name == "nt" else "clear")
+                    clear_screen()
                     if has_conversations(chosen):
                         continue  # back to conversation selection
                     else:
@@ -777,10 +797,10 @@ if __name__ == "__main__":
                 else:
                     sys.exit(0)
             if conv_file == 'back':
-                os.system("cls" if os.name == "nt" else "clear")
+                clear_screen()
                 continue  # select model again
             elif conv_file == 'server_inactive':
-                os.system("cls" if os.name == "nt" else "clear")
+                clear_screen()
                 break  # back to server selection
             else:
                 break
