@@ -101,7 +101,9 @@ def update_existing(api, df, batch_size):
             ip_query = " OR ".join(f"ip:{ip}" for ip in chunk)
             query = f"port:{port} ({ip_query})"
             try:
-                results = api.search(query, limit=batch_size).get("matches", [])
+                results = (
+                    api.search(query, limit=batch_size).get("matches", [])
+                )
                 for r in results:
                     key = (r.get("ip_str"), r.get("port"))
                     details[key] = r
@@ -157,7 +159,7 @@ def find_new(api, df, limit):
     for query in SHODAN_QUERIES:
         logging.info(f"Executing Shodan query: {query} (limit {limit})")
         try:
-            results = api.search(query, limit=limit).get("matches", [])
+            results = api.search(query, limit=limit * 5).get("matches", [])
         except shodan.APIError as e:
             logging.info(f"Shodan query failed: {e}")
             continue
@@ -208,6 +210,8 @@ def find_new(api, df, limit):
                 new_df.at[idx, "ping"] = latency
                 new_df.at[idx, "is_active"] = True
                 new_df.at[idx, "inactive_reason"] = ""
+        new_df.sort_values(by="ping", inplace=True, na_position="last")
+        new_df = new_df.head(limit)
         if df.empty:
             df = new_df
         else:
@@ -225,14 +229,14 @@ def main():
     parser.add_argument(
         "--limit",
         type=int,
-        default=100,
-        help="Maximum results to fetch per Shodan query",
+        default=25,
+        help="Maximum new endpoints to append per Shodan query",
     )
     parser.add_argument(
         "--existing-limit",
         type=int,
-        default=100,
-        help="Maximum endpoints to verify per query when checking existing entries",
+        default=25,
+        help="Maximum existing endpoints to verify per run",
     )
     args = parser.parse_args()
 
@@ -256,7 +260,14 @@ def main():
             df[col] = ""
 
     logging.info("Updating existing endpoints")
-    df = update_existing(api, df, args.existing_limit)
+    oldest_idx = (
+        df.sort_values(by="last_check_date")
+        .head(args.existing_limit)
+        .index
+    )
+    df.loc[oldest_idx] = update_existing(
+        api, df.loc[oldest_idx].copy(), args.existing_limit
+    )
     logging.info("Finished updating existing endpoints")
 
     logging.info("Searching for new endpoints")

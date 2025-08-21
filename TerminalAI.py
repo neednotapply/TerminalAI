@@ -240,27 +240,32 @@ def redraw_ui(model):
     print(f"{GREEN}Active Model: {model} | {selected_server['nickname']}{RESET}")
     print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick{RESET}")
 
-def display_connecting_box():
-    cols, rows = shutil.get_terminal_size(fallback=(80,24))
-    w,h = 30,5
-    x = (cols-w)//2; y=(rows-h)//2
-    print("\033[?25l", end='')
-    os.system("cls" if os.name=="nt" else "clear")
+def display_connecting_box(x, y, w, h):
     for i in range(h):
         print(f"\033[{y+i};{x}H{' '*w}{RESET}")
-    msg="HACK THE PLANET"
-    mx = x + (w-len(msg))//2; my = y + h//2
-    print(f"\033[{my};{mx}H\033[1;32m",end='')
+    msg = "HACK THE PLANET"
+    mx = x + (w - len(msg)) // 2
+    my = y + h // 2
+    print(f"\033[{my};{mx}H\033[1;32m", end="")
     for char in msg:
-        print(char, end='', flush=True)
+        print(char, end="", flush=True)
         time.sleep(0.08)
     time.sleep(1.5)
-    print(RESET+"\033[?25h")
 
-def matrix_rain(persistent=False, duration=3, stop_event=None):
-    charset = "01$#*+=-░▒▓▌▐▄▀▁▂▃▅▆▇█ﾊﾐﾋｰｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ""01$#*+=-"
+def rain(
+    persistent=False,
+    duration=3,
+    stop_event=None,
+    box_top=None,
+    box_bottom=None,
+    box_left=None,
+    box_right=None,
+):
+    charset = (
+        "01$#*+=-░▒▓▌▐▄▀▁▂▃▅▆▇█ﾊﾐﾋｰｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ""01$#*+=-"
+    )
     try:
-        print("\033[?25l", end='')
+        print("\033[?25l", end="")
         os.system("cls" if os.name == "nt" else "clear")
         end_time = time.time() + duration if not persistent else None
         columns, rows = shutil.get_terminal_size(fallback=(80, 24))
@@ -278,18 +283,31 @@ def matrix_rain(persistent=False, duration=3, stop_event=None):
                 for t in range(trail_length):
                     y = drop_pos - t
                     if 0 < y < rows:
-                        if t < 4:
-                            char = random.choice(charset)
-                        else:
-                            char = ' '
+                        if (
+                            box_top is not None
+                            and box_bottom is not None
+                            and box_left is not None
+                            and box_right is not None
+                            and box_top <= y <= box_bottom
+                            and box_left <= col + 1 <= box_right
+                        ):
+                            continue
+                        char = random.choice(charset) if t < 4 else " "
                         shade = (
-                            "\033[92m" if t == 0 else
-                            "\033[32m" if t == 1 else
-                            "\033[32;2m" if t == 2 else
-                            "\033[2;32m" if t == 3 else
-                            ""
+                            "\033[92m"
+                            if t == 0
+                            else "\033[32m"
+                            if t == 1
+                            else "\033[32;2m"
+                            if t == 2
+                            else "\033[2;32m"
+                            if t == 3
+                            else ""
                         )
-                        print(f"\033[{y};{col+1}H{shade}{char}{RESET}", end='')
+                        print(
+                            f"\033[{y};{col+1}H{shade}{char}{RESET}",
+                            end="",
+                        )
                 drops[col] = (drops[col] + 1) % (rows + trail_length)
             sys.stdout.flush()
             time.sleep(0.08)
@@ -309,7 +327,7 @@ def matrix_rain(persistent=False, duration=3, stop_event=None):
         if os.name != "nt":
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         time.sleep(0.5)
-        print("\033[0m\033[2J\033[H\033[?25h", end='')
+        print("\033[0m\033[2J\033[H\033[?25h", end="")
 
 def render_markdown(text):
     lines = text.splitlines()
@@ -384,7 +402,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             if os.name == "nt":
                 while True:
                     if time.time() - start > IDLE_TIMEOUT:
-                        matrix_rain(persistent=True)
+                        rain(persistent=True)
                         redraw_ui(model)
                         reprint_history(history)
                         sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
@@ -417,7 +435,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 try:
                     while True:
                         if time.time() - start > IDLE_TIMEOUT:
-                            matrix_rain(persistent=True)
+                            rain(persistent=True)
                             redraw_ui(model)
                             reprint_history(history)
                             sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
@@ -611,14 +629,26 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
 if __name__ == "__main__":
     selected_api = 'ollama'
 
-    display_connecting_box()
-    ping_thread = threading.Thread(target=update_pings, daemon=True)
-    ping_thread.start()
+    cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+    box_w, box_h = 30, 5
+    box_x = (cols - box_w) // 2
+    box_y = (rows - box_h) // 2
     stop_rain = threading.Event()
     rain_thread = threading.Thread(
-        target=matrix_rain, kwargs={"persistent": True, "stop_event": stop_rain}
+        target=rain,
+        kwargs={
+            "persistent": True,
+            "stop_event": stop_rain,
+            "box_top": box_y,
+            "box_bottom": box_y + box_h - 1,
+            "box_left": box_x,
+            "box_right": box_x + box_w - 1,
+        },
     )
     rain_thread.start()
+    display_connecting_box(box_x, box_y, box_w, box_h)
+    ping_thread = threading.Thread(target=update_pings, daemon=True)
+    ping_thread.start()
     ping_thread.join()
     stop_rain.set()
     rain_thread.join()
