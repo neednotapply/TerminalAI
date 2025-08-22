@@ -8,6 +8,7 @@ import sys
 import time
 
 RESET = "\033[0m"
+GREEN = "\033[38;2;5;249;0m"
 
 if os.name == "nt":
     import msvcrt
@@ -75,7 +76,7 @@ def rain(
                             continue
                         char = random.choice(charset) if t < 4 else " "
                         shade = (
-                            "\033[92m"
+                            GREEN
                             if t == 0
                             else "\033[32m"
                             if t == 1
