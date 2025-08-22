@@ -81,7 +81,7 @@ def stop_thinking_timer(start, stop_event, timed_out=False):
     elapsed = int(time.time() - start)
     status = " [Timed out]" if timed_out else ""
     print(
-        f"\r{AI_COLOR}\U0001f5a5️ : TFhinking... ({elapsed}s){status}{RESET}"
+        f"\r{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){status}{RESET}"
     )
     return elapsed
 
@@ -151,6 +151,75 @@ def get_input(prompt):
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
+
+
+def get_key():
+    if os.name == "nt":
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                return "ENTER"
+            if ch == " ":
+                return "SPACE"
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                if ch2 == "H":
+                    return "UP"
+                if ch2 == "P":
+                    return "DOWN"
+                continue
+            if ch == "\x1b":
+                return "ESC"
+            return ch
+    else:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                if select.select([sys.stdin], [], [], 0.01)[0]:
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == "[":
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == "A":
+                            return "UP"
+                        if ch3 == "B":
+                            return "DOWN"
+                    return "ESC"
+                return "ESC"
+            if ch in ("\n", "\r"):
+                return "ENTER"
+            if ch == " ":
+                return "SPACE"
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def interactive_menu(header, options):
+    idx = 0
+    while True:
+        clear_screen()
+        print(f"{CYAN}{header}{RESET}")
+        for i, opt in enumerate(options):
+            marker = f"{YELLOW}> {RESET}" if i == idx else "  "
+            line = f"{BOLD}{opt}{RESET}" if i == idx else opt
+            print(f"{marker}{line}")
+        key = get_key()
+        if key == "UP":
+            idx = (idx - 1) % len(options)
+        elif key == "DOWN":
+            idx = (idx + 1) % len(options)
+        elif key in ("ENTER", "SPACE"):
+            return idx
+        elif key == "ESC":
+            return None
+
+
+def confirm_exit():
+    choice = interactive_menu("Exit?", ["No", "Yes"])
+    return choice == 1
 
 
 def load_servers():
@@ -300,39 +369,68 @@ def update_pings():
     df.to_csv(CSV_PATH, index=False)
 
 def select_server(servers):
-    print(f"{CYAN}Available Servers:{RESET}")
-    for i, s in enumerate(servers, 1):
-        ping_val = s.get("ping", float("inf"))
-        ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
-        color = heat_color(ping_val)
-        ip_col = f"{color}{s['ip']}{RESET}"
-        ping_col = f"{color}{ping_str}{RESET}"
-        print(f"{GREEN}{i}. {s['nickname']}{RESET} ({ip_col}) - {ping_col}")
-    while True:
-        c = get_input(f"{CYAN}Select server: {RESET}")
-        if c == "ESC":
-            confirm = get_input(f"{CYAN}Exit? y/n: {RESET}")
-            if confirm.lower() == "y":
-                sys.exit(0)
-            else:
-                continue
-        if c.isdigit() and 1 <= int(c) <= len(servers):
-            return servers[int(c) - 1]
-        print(f"{RED}Invalid selection{RESET}")
+    if VERBOSE:
+        print(f"{CYAN}Available Servers:{RESET}")
+        for i, s in enumerate(servers, 1):
+            ping_val = s.get("ping", float("inf"))
+            ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
+            color = heat_color(ping_val)
+            ip_col = f"{color}{s['ip']}{RESET}"
+            ping_col = f"{color}{ping_str}{RESET}"
+            print(f"{GREEN}{i}. {s['nickname']}{RESET} ({ip_col}) - {ping_col}")
+        while True:
+            c = get_input(f"{CYAN}Select server: {RESET}")
+            if c == "ESC":
+                confirm = get_input(f"{CYAN}Exit? y/n: {RESET}")
+                if confirm.lower() == "y":
+                    sys.exit(0)
+                else:
+                    continue
+            if c.isdigit() and 1 <= int(c) <= len(servers):
+                return servers[int(c) - 1]
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        options = []
+        for s in servers:
+            ping_val = s.get("ping", float("inf"))
+            ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
+            color = heat_color(ping_val)
+            ip_col = f"{color}{s['ip']}{RESET}"
+            ping_col = f"{color}{ping_str}{RESET}"
+            options.append(f"{s['nickname']} ({ip_col}) - {ping_col}")
+        while True:
+            choice = interactive_menu("Available Servers:", options)
+            if choice is None:
+                if confirm_exit():
+                    sys.exit(0)
+                else:
+                    continue
+            return servers[choice]
 
 def select_model(models):
-    print(f"{CYAN}Available Models:{RESET}")
-    for i, model in enumerate(models, 1):
-        mark = " *" if has_conversations(model) else ""
-        print(f"{GREEN}{i}. {model}{mark}{RESET}")
-    print(f"{GREEN}0. [Back]{RESET}")
-    while True:
-        c = get_input(f"{CYAN}Select model: {RESET}")
-        if c in ("ESC", "0") or c.lower() == "back":
-            return None
-        if c.isdigit() and 1 <= int(c) <= len(models):
-            return models[int(c) - 1]
-        print(f"{RED}Invalid selection{RESET}")
+    if VERBOSE:
+        print(f"{CYAN}Available Models:{RESET}")
+        for i, model in enumerate(models, 1):
+            mark = " *" if has_conversations(model) else ""
+            print(f"{GREEN}{i}. {model}{mark}{RESET}")
+        print(f"{GREEN}0. [Back]{RESET}")
+        while True:
+            c = get_input(f"{CYAN}Select model: {RESET}")
+            if c in ("ESC", "0") or c.lower() == "back":
+                return None
+            if c.isdigit() and 1 <= int(c) <= len(models):
+                return models[int(c) - 1]
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        options = []
+        for model in models:
+            mark = " *" if has_conversations(model) else ""
+            options.append(f"{model}{mark}")
+        while True:
+            choice = interactive_menu("Available Models:", options)
+            if choice is None:
+                return None
+            return models[choice]
 
 def fetch_models():
     try:
@@ -414,23 +512,35 @@ def select_conversation(model):
         print(f"{CYAN}No previous conversations found.{RESET}")
         return None, [], [], None
 
-    print(f"{CYAN}Conversations:{RESET}")
-    print(f"{GREEN}1. Start new conversation{RESET}")
-    for i, c in enumerate(convs, 2):
-        print(f"{GREEN}{i}. {c['title']}{RESET}")
-    print(f"{GREEN}0. [Back]{RESET}")
+    if VERBOSE:
+        print(f"{CYAN}Conversations:{RESET}")
+        print(f"{GREEN}1. Start new conversation{RESET}")
+        for i, c in enumerate(convs, 2):
+            print(f"{GREEN}{i}. {c['title']}{RESET}")
+        print(f"{GREEN}0. [Back]{RESET}")
 
-    while True:
-        choice = get_input(f"{CYAN}Select conversation: {RESET}")
-        if choice in ("ESC", "0") or choice.lower() == "back":
-            return 'back', None, None, None
-        if choice == '1':
-            return None, [], [], None
-        if choice.isdigit() and 2 <= int(choice) < len(convs) + 2:
-            file = convs[int(choice) - 2]['file']
+        while True:
+            choice = get_input(f"{CYAN}Select conversation: {RESET}")
+            if choice in ("ESC", "0") or choice.lower() == "back":
+                return 'back', None, None, None
+            if choice == '1':
+                return None, [], [], None
+            if choice.isdigit() and 2 <= int(choice) < len(convs) + 2:
+                file = convs[int(choice) - 2]['file']
+                messages, history, context = load_conversation(model, file)
+                return file, messages, history, context
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        options = ["Start new conversation"] + [c['title'] for c in convs]
+        while True:
+            choice = interactive_menu("Conversations:", options)
+            if choice is None:
+                return 'back', None, None, None
+            if choice == 0:
+                return None, [], [], None
+            file = convs[choice - 1]['file']
             messages, history, context = load_conversation(model, file)
             return file, messages, history, context
-        print(f"{RED}Invalid selection{RESET}")
 
 def chat_loop(model, conv_file, messages=None, history=None, context=None):
     global SERVER_URL, selected_server, selected_api
