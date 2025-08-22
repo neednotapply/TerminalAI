@@ -536,7 +536,10 @@ def render_markdown(text):
             in_code = not in_code
             print("=" * 60)
             continue
-        print(ln.replace("</s>", ""))
+        out = ln.replace("</s>", "")
+        if not in_code:
+            out = out.lstrip()
+        print(out)
     print()
 
 def reprint_history(history):

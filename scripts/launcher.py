@@ -24,7 +24,7 @@ VERBOSE = "--verbose" in sys.argv
 if os.name == "nt":
     import msvcrt
 else:
-    from curses_nav import interactive_menu
+    import curses
     from rain import rain
 
 
@@ -42,17 +42,32 @@ def run_verbose() -> int | None:
 
 
 def run_windows_menu() -> int | None:
-    """Interactive menu using msvcrt for Windows."""
+    """Interactive menu using msvcrt for Windows with boxed layout."""
     idx = 0
-    columns, _ = shutil.get_terminal_size(fallback=(80, 24))
     while True:
         os.system("cls")
+        columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+        header_w = max(len(line) for line in HEADER_LINES) + 2
+        header_x = max((columns - header_w) // 2, 0)
+        header_h = len(HEADER_LINES) + 2
+        print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
         for line in HEADER_LINES:
-            print(f"{GREEN}{line.center(columns)}{RESET}")
+            print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
+        print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
+
+        menu_w = max(len(opt) + 2 for opt in OPTIONS) + 2
+        menu_h = len(OPTIONS) + 2
+        menu_x = max((columns - menu_w) // 2, 0)
+        menu_y = max((rows - menu_h) // 2, 0)
+        for _ in range(max(0, menu_y - header_h)):
+            print()
+        print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
         for i, opt in enumerate(OPTIONS):
             prefix = "> " if i == idx else "  "
-            text = prefix + opt
-            print(f"{GREEN}{text.center(columns)}{RESET}")
+            line = prefix + opt
+            print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
+        print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+
         ch = msvcrt.getwch()
         if ch in ("\r", "\n"):
             return idx
@@ -67,28 +82,83 @@ def run_windows_menu() -> int | None:
 
 
 def run_unix_menu() -> int | None:
-    """Use curses-based menu on Unix-like systems."""
-    header = "\n".join(HEADER_LINES)
-    columns, _ = shutil.get_terminal_size(fallback=(80, 24))
-    max_width = max(len(line) for line in HEADER_LINES + [f"> {o}" for o in OPTIONS])
-    start_col = max((columns - max_width) // 2, 0) + 1
+    """Use curses-based menu on Unix-like systems with boxed logo and menu."""
+    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+    header_w = max(len(line) for line in HEADER_LINES) + 2
+    header_h = len(HEADER_LINES) + 2
+    header_x = max((columns - header_w) // 2, 0)
+
+    menu_w = max(len("> " + o) for o in OPTIONS) + 2
+    menu_h = len(OPTIONS) + 2
+    menu_x = max((columns - menu_w) // 2, 0)
+    menu_y = max((rows - menu_h) // 2, 0)
+
+    boxes = [
+        {"top": 1, "bottom": header_h, "left": header_x + 1, "right": header_x + header_w},
+        {
+            "top": menu_y + 1,
+            "bottom": menu_y + menu_h,
+            "left": menu_x + 1,
+            "right": menu_x + menu_w,
+        },
+    ]
     stop_event = threading.Event()
     rain_thread = threading.Thread(
         target=rain,
-        kwargs={
-            "persistent": True,
-            "stop_event": stop_event,
-            "box_top": 1,
-            "box_bottom": len(HEADER_LINES) + len(OPTIONS),
-            "box_left": start_col,
-            "box_right": start_col + max_width - 1,
-            "clear_screen": False,
-        },
+        kwargs={"persistent": True, "stop_event": stop_event, "boxes": boxes, "clear_screen": False},
         daemon=True,
     )
     rain_thread.start()
+
+    def _menu(stdscr):
+        curses.curs_set(0)
+        curses.start_color()
+        try:
+            if curses.can_change_color():
+                curses.init_color(10, 20, 976, 0)
+                curses.init_pair(1, 10, curses.COLOR_BLACK)
+            else:
+                curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
+        except curses.error:
+            curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
+        green = curses.color_pair(1)
+        idx = 0
+        while True:
+            stdscr.erase()
+            _, cols = stdscr.getmaxyx()
+            # draw header box at top
+            header_win = curses.newwin(header_h, header_w, 0, max((cols - header_w) // 2, 0))
+            header_win.attron(green)
+            header_win.border()
+            header_win.attroff(green)
+            for i, line in enumerate(HEADER_LINES, 1):
+                header_win.addstr(i, (header_w - len(line)) // 2, line, green)
+            header_win.refresh()
+
+            # draw menu box centered
+            menu_win = curses.newwin(menu_h, menu_w, menu_y, menu_x)
+            menu_win.attron(green)
+            menu_win.border()
+            menu_win.attroff(green)
+            for i, opt in enumerate(OPTIONS):
+                marker = "> " if i == idx else "  "
+                text = marker + opt
+                attr = curses.A_BOLD if i == idx else curses.A_NORMAL
+                menu_win.addstr(1 + i, 1, text.ljust(menu_w - 2), green | attr)
+            menu_win.refresh()
+
+            key = stdscr.getch()
+            if key == curses.KEY_UP:
+                idx = (idx - 1) % len(OPTIONS)
+            elif key == curses.KEY_DOWN:
+                idx = (idx + 1) % len(OPTIONS)
+            elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
+                return idx
+            elif key == 27:
+                return None
+
     try:
-        return interactive_menu(header, OPTIONS, center=True)
+        return curses.wrapper(_menu)
     finally:
         stop_event.set()
         rain_thread.join()
