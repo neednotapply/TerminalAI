@@ -4,6 +4,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+import select
 
 import rain
 
@@ -51,18 +53,22 @@ def print_options(box_top: int, box_left: int) -> None:
 def read_choice() -> str:
     if os.name == "nt":
         while True:
-            ch = msvcrt.getwch()
-            if ch in ("1", "2"):
-                return ch
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("1", "2"):
+                    return ch
+            time.sleep(0.05)
     else:
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
             tty.setcbreak(fd)
             while True:
-                ch = sys.stdin.read(1)
-                if ch in ("1", "2"):
-                    return ch
+                dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if dr:
+                    ch = sys.stdin.read(1)
+                    if ch in ("1", "2"):
+                        return ch
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
