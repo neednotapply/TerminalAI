@@ -84,6 +84,19 @@ def print_options_verbose(box_top: int, box_left: int, options) -> None:
         )
 
 
+def _read_escape_sequence(initial_timeout: float = 0.25) -> str:
+    """Read characters following an ESC to capture full arrow sequences."""
+    seq = ""
+    dr, _, _ = select.select([sys.stdin], [], [], initial_timeout)
+    if dr:
+        seq += sys.stdin.read(1)
+        while True:
+            dr, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if not dr:
+                break
+            seq += sys.stdin.read(1)
+    return seq
+
 def read_choice() -> int | None:
     if os.name == "nt":
         while True:
@@ -93,6 +106,9 @@ def read_choice() -> int | None:
                     return int(ch) - 1
                 if ch == "\x1b":
                     return None
+                if ch in ("\x00", "\xe0"):
+                    msvcrt.getwch()
+                    continue
             time.sleep(0.05)
     else:
         fd = sys.stdin.fileno()
@@ -106,6 +122,9 @@ def read_choice() -> int | None:
                     if ch in ("1", "2"):
                         return int(ch) - 1
                     if ch == "\x1b":
+                        seq = _read_escape_sequence()
+                        if seq.endswith(("A", "B", "C", "D")):
+                            continue
                         return None
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -136,15 +155,7 @@ def get_key():
             tty.setcbreak(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                seq = ""
-                while True:
-                    dr, _, _ = select.select([sys.stdin], [], [], 0.2)
-                    if dr:
-                        seq += sys.stdin.read(1)
-                        if seq[-1] in "ABCD":
-                            break
-                    else:
-                        break
+                seq = _read_escape_sequence()
                 if seq.endswith("A"):
                     return "UP"
                 if seq.endswith("B"):

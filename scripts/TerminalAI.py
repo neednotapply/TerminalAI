@@ -86,6 +86,20 @@ def stop_thinking_timer(start, stop_event, timed_out=False):
     return elapsed
 
 
+def _read_escape_sequence(initial_timeout: float = 0.25) -> str:
+    """Read characters following an ESC to capture full arrow sequences."""
+    seq = ""
+    dr, _, _ = select.select([sys.stdin], [], [], initial_timeout)
+    if dr:
+        seq += sys.stdin.read(1)
+        while True:
+            dr, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if not dr:
+                break
+            seq += sys.stdin.read(1)
+    return seq
+
+
 def get_input(prompt):
     """Read a line of input allowing basic arrow-key navigation."""
     if os.name == "nt":
@@ -150,13 +164,7 @@ def get_input(prompt):
                     sys.stdout.flush()
                     continue
                 if ch == "\x1b":
-                    seq = ""
-                    while True:
-                        dr, _, _ = select.select([sys.stdin], [], [], 0.05)
-                        if dr:
-                            seq += sys.stdin.read(1)
-                        else:
-                            break
+                    seq = _read_escape_sequence()
                     if seq.endswith("C"):  # right
                         if pos < len(buf):
                             sys.stdout.write(buf[pos])
@@ -209,15 +217,7 @@ def get_key():
             tty.setcbreak(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                seq = ""
-                while True:
-                    dr, _, _ = select.select([sys.stdin], [], [], 0.2)
-                    if dr:
-                        seq += sys.stdin.read(1)
-                        if seq[-1] in "ABCD":
-                            break
-                    else:
-                        break
+                seq = _read_escape_sequence()
                 if seq.endswith("A"):
                     return "UP"
                 if seq.endswith("B"):
