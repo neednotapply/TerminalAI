@@ -13,6 +13,8 @@ GREEN = "\033[32m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
+VERBOSE = "--verbose" in sys.argv
+
 if os.name == "nt":
     import colorama
     colorama.init()
@@ -45,18 +47,33 @@ def draw_box(top: int, left: int, width: int, height: int) -> None:
     print(f"\033[{top + height};{left + 1}H└{horiz}┘{RESET}", end="")
 
 
-def print_options(box_top: int, box_left: int) -> None:
-    print(f"\033[{box_top + 2};{box_left + 3}H{GREEN}1) Start TerminalAI", end="")
-    print(f"\033[{box_top + 3};{box_left + 3}H2) Scan Shodan{RESET}", end="")
+def print_options(box_top: int, box_left: int, options, idx: int) -> None:
+    for i, opt in enumerate(options):
+        marker = "> " if i == idx else "  "
+        line = f"{BOLD}{opt}{RESET}" if i == idx else opt
+        print(
+            f"\033[{box_top + 2 + i};{box_left + 3}H{GREEN}{marker}{line}{RESET}",
+            end="",
+        )
 
 
-def read_choice() -> str:
+def print_options_verbose(box_top: int, box_left: int, options) -> None:
+    for i, opt in enumerate(options, 1):
+        print(
+            f"\033[{box_top + 1 + i};{box_left + 3}H{GREEN}{i}) {opt}{RESET}",
+            end="",
+        )
+
+
+def read_choice() -> int | None:
     if os.name == "nt":
         while True:
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
                 if ch in ("1", "2"):
-                    return ch
+                    return int(ch) - 1
+                if ch == "\x1b":
+                    return None
             time.sleep(0.05)
     else:
         fd = sys.stdin.fileno()
@@ -68,9 +85,71 @@ def read_choice() -> str:
                 if dr:
                     ch = sys.stdin.read(1)
                     if ch in ("1", "2"):
-                        return ch
+                        return int(ch) - 1
+                    if ch == "\x1b":
+                        return None
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def get_key():
+    if os.name == "nt":
+        while True:
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                return "ENTER"
+            if ch == " ":
+                return "SPACE"
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                if ch2 == "H":
+                    return "UP"
+                if ch2 == "P":
+                    return "DOWN"
+                continue
+            if ch == "\x1b":
+                return "ESC"
+            return ch
+    else:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            ch = sys.stdin.read(1)
+            if ch == "\x1b":
+                if select.select([sys.stdin], [], [], 0.01)[0]:
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == "[":
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == "A":
+                            return "UP"
+                        if ch3 == "B":
+                            return "DOWN"
+                    return "ESC"
+                return "ESC"
+            if ch in ("\n", "\r"):
+                return "ENTER"
+            if ch == " ":
+                return "SPACE"
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def interactive_choice(box_top: int, box_left: int, options) -> int | None:
+    idx = 0
+    while True:
+        print_options(box_top, box_left, options, idx)
+        sys.stdout.flush()
+        key = get_key()
+        if key == "UP":
+            idx = (idx - 1) % len(options)
+        elif key == "DOWN":
+            idx = (idx + 1) % len(options)
+        elif key in ("ENTER", "SPACE"):
+            return idx
+        elif key == "ESC":
+            return None
 
 
 def main() -> None:
@@ -116,19 +195,26 @@ def main() -> None:
     try:
         draw_header(header_top, header_left)
         draw_box(box_top, box_left, box_width, box_height)
-        print_options(box_top, box_left)
-        sys.stdout.flush()
-        choice = read_choice()
+        options = ["Start TerminalAI", "Scan Shodan"]
+        if VERBOSE:
+            print_options_verbose(box_top, box_left, options)
+            sys.stdout.flush()
+            choice = read_choice()
+        else:
+            choice = interactive_choice(box_top, box_left, options)
     finally:
         stop_event.set()
         rain_thread.join()
         print("\033[0m\033[2J\033[H\033[?25h", end="")
         sys.stdout.flush()
+    if choice is None:
+        return
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    if choice == "1":
-        subprocess.call([sys.executable, os.path.join(script_dir, "TerminalAI.py")])
+    args = sys.argv[1:]
+    if choice == 0:
+        subprocess.call([sys.executable, os.path.join(script_dir, "TerminalAI.py"), *args])
     else:
-        subprocess.call([sys.executable, os.path.join(script_dir, "shodanscan.py")])
+        subprocess.call([sys.executable, os.path.join(script_dir, "shodanscan.py"), *args])
 
 
 if __name__ == "__main__":
