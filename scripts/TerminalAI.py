@@ -133,12 +133,14 @@ def get_input(prompt):
                             sys.stdout.write("\b \b")
                             sys.stdout.flush()
                     elif ch == "\x1b":
-                        # Gather the rest of the escape sequence, if any
                         seq = ""
-                        while select.select([sys.stdin], [], [], 0.01)[0]:
-                            seq += sys.stdin.read(1)
-                        # Ignore common arrow-key sequences
-                        if seq and seq[-1] in "ABCD":
+                        while True:
+                            dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                            if dr:
+                                seq += sys.stdin.read(1)
+                            else:
+                                break
+                        if seq.endswith(("A", "B", "C", "D")):
                             continue
                         print()
                         return "ESC"
@@ -176,16 +178,17 @@ def get_key():
             tty.setcbreak(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                # Read the rest of the escape sequence without blocking
                 seq = ""
-                while select.select([sys.stdin], [], [], 0.01)[0]:
-                    seq += sys.stdin.read(1)
-                if seq:
-                    final = seq[-1]
-                    if final == "A":
-                        return "UP"
-                    if final == "B":
-                        return "DOWN"
+                while True:
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if dr:
+                        seq += sys.stdin.read(1)
+                    else:
+                        break
+                if seq.endswith("A"):
+                    return "UP"
+                if seq.endswith("B"):
+                    return "DOWN"
                 return "ESC"
             if ch in ("\n", "\r"):
                 return "ENTER"
