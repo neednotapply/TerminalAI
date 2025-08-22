@@ -14,6 +14,7 @@ TerminalAI is a retro-styled client for chatting with Ollama models and for disc
 2. **Install Python dependencies**
 
    ```bash
+   cd data
    pip3 install -r requirements.txt
    ```
 
