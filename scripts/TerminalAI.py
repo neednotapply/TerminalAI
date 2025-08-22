@@ -22,7 +22,7 @@ else:
     import tty
 
 # ANSI colors
-GREEN = "\033[92m"
+GREEN = "\033[38;2;5;249;0m"
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
@@ -229,15 +229,17 @@ def interactive_menu(header, options):
     offset = 0
     while True:
         clear_screen()
-        print(f"{CYAN}{header}{RESET}")
+        print(f"{GREEN}{header}{RESET}")
         rows = shutil.get_terminal_size(fallback=(80, 24)).lines
         view_height = max(1, rows - 2)
         end = offset + view_height
         visible = options[offset:end]
         for i, opt in enumerate(visible):
             actual = offset + i
-            marker = f"{YELLOW}> {RESET}" if actual == idx else "  "
-            line = f"{BOLD}{opt}{RESET}" if actual == idx else opt
+            marker = f"{GREEN}> {RESET}" if actual == idx else "  "
+            line = (
+                f"{BOLD}{GREEN}{opt}{RESET}" if actual == idx else f"{GREEN}{opt}{RESET}"
+            )
             print(f"{marker}{line}")
         key = get_key()
         if key == "UP":
@@ -417,10 +419,7 @@ def select_server(servers):
         for i, s in enumerate(servers, 1):
             ping_val = s.get("ping", float("inf"))
             ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
-            color = heat_color(ping_val)
-            ip_col = f"{color}{s['ip']}{RESET}"
-            ping_col = f"{color}{ping_str}{RESET}"
-            print(f"{GREEN}{i}. {s['nickname']}{RESET} ({ip_col}) - {ping_col}")
+            print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}) - {ping_str}{RESET}")
         while True:
             c = get_input(f"{CYAN}Select server: {RESET}")
             if c == "ESC":
@@ -437,10 +436,7 @@ def select_server(servers):
         for s in servers:
             ping_val = s.get("ping", float("inf"))
             ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
-            color = heat_color(ping_val)
-            ip_col = f"{color}{s['ip']}{RESET}"
-            ping_col = f"{color}{ping_str}{RESET}"
-            options.append(f"{s['nickname']} ({ip_col}) - {ping_col}")
+            options.append(f"{s['nickname']} ({s['ip']}) - {ping_str}")
         while True:
             choice = interactive_menu("Available Servers:", options)
             if choice is None:
