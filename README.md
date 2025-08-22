@@ -14,7 +14,7 @@ TerminalAI is a retro-styled client for chatting with Ollama models and for disc
 2. **Install Python dependencies**
 
    ```bash
-   pip install -r requirements.txt
+   pip3 install -r requirements.txt
    ```
 
 3. **Prepare data files**
@@ -42,7 +42,7 @@ Press `1` or `2` to choose an action. The launcher restores the console on exit.
 Run the chat client directly if desired:
 
 ```bash
-python scripts/TerminalAI.py
+python3 scripts/TerminalAI.py
 ```
 
 The client loads servers from `data/endpoints.csv`, pings them to sort by latency, and stores conversations under `data/conversations`. Logs produced with the `/print` command are written to `data/logs`.
@@ -52,7 +52,7 @@ The client loads servers from `data/endpoints.csv`, pings them to sort by latenc
 Scan for new Ollama servers and verify existing ones:
 
 ```bash
-python scripts/shodanscan.py [--verbose] [--limit N] [--existing-limit N]
+python3 scripts/shodanscan.py [--verbose] [--limit N] [--existing-limit N]
 ```
 
 The script requires a Shodan API key. Results are appended to `data/endpoints.csv` and enriched with metadata such as hostnames, organisation, ISP, and location. Existing entries are checked for availability and ping time.
@@ -62,7 +62,7 @@ The script requires a Shodan API key. Results are appended to `data/endpoints.cs
 Run a basic syntax check on all Python scripts:
 
 ```bash
-python -m py_compile scripts/*.py
+python3 -m py_compile scripts/*.py
 ```
 
 ## Data Layout
