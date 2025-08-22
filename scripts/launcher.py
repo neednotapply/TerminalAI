@@ -136,16 +136,17 @@ def get_key():
             tty.setcbreak(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                # Read the rest of the escape sequence without blocking
                 seq = ""
-                while select.select([sys.stdin], [], [], 0.01)[0]:
-                    seq += sys.stdin.read(1)
-                if seq:
-                    final = seq[-1]
-                    if final == "A":
-                        return "UP"
-                    if final == "B":
-                        return "DOWN"
+                while True:
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if dr:
+                        seq += sys.stdin.read(1)
+                    else:
+                        break
+                if seq.endswith("A"):
+                    return "UP"
+                if seq.endswith("B"):
+                    return "DOWN"
                 return "ESC"
             if ch in ("\n", "\r"):
                 return "ENTER"
