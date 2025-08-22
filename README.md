@@ -1,74 +1,77 @@
-Basic script to converse with Ollama endpoints.
-`data/endpoints.csv` needs to be populated with valid Ollama endpoints.
+# TerminalAI
 
-Use `launcher.sh` (Linux/macOS) or `launcher.bat` (Windows) for a retro
-ANSI menu that lets you choose between scanning Shodan and starting the
-TerminalAI chat client.
+TerminalAI is a retro-styled client for chatting with Ollama models and for discovering new public instances via Shodan. A matrix rain launcher provides a unified entry point on Linux, macOS, and Windows.
 
-Conversations are stored per model in `data/conversations`. After
-selecting a model you can resume a previous chat if one exists or start a new
-session. Requests to chat-style endpoints still resend the full message history
-and the request timeout grows with conversation length. When the lower-level
-`/api/generate` endpoint is used, the script instead persists and sends the
-token `context` returned by the API so only the latest prompt is transmitted.
+## Installation
 
-At launch the program pings all known servers in the background while the
-"rain" animation plays. Hosts are sorted by ping time and any that fail to
-respond are marked inactive and omitted from the selection list.
+1. **Clone the repository**
 
-Logs produced by the `/print` command or when saving on exit are written under
-the `data/logs` directory, which is created automatically if needed.
+   ```bash
+   git clone <REPO_URL>
+   cd TerminalAI
+   ```
 
-## Automatic population
+2. **Install Python dependencies**
 
-The `shodanscan.py` helper uses the [Shodan](https://www.shodan.io/) API to
-keep `data/endpoints.csv` up to date. It performs two tasks:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-1. Verify the online status of servers already present in the CSV using
-   batched queries per port.
-2. Search Shodan for additional public Ollama instances and append them.
+3. **Prepare data files**
+   - Copy `data/endpoints.example.csv` to `data/endpoints.csv` and add any known servers.
+   - (Optional) Create `data/config.json` or set the `SHODAN_API_KEY` environment variable for Shodan queries. A template is available at `data/config.example.json`.
 
-By default the script looks for hosts on the standard Ollama port (11434)
-whose HTTP response contains the text "Ollama is running".
+## Usage
 
-As part of the scan each server is also pinged locally. The round-trip time is
-stored in the `ping` column and any host that does not answer is marked
-inactive.
+### Launcher
 
-Create a `data/config.json` with your API key. A
-`data/config.example.json` template is provided:
+Use the launcher for a graphical menu with matrix rain effects.
 
-```json
-{
-  "SHODAN_API_KEY": "your_key_here"
-}
-```
+- **Linux/macOS**: `./launcher.sh`
+- **Windows**: `launcher.bat`
 
-Alternatively, set the `SHODAN_API_KEY` environment variable. The file takes
-precedence over the environment variable if both are present. Run the script:
+The launcher offers two actions:
+
+1. **Start TerminalAI** – chat with a selected Ollama server.
+2. **Scan Shodan** – update `data/endpoints.csv` with public instances.
+
+Press `1` or `2` to choose an action. The launcher restores the console on exit.
+
+### Chat Client
+
+Run the chat client directly if desired:
 
 ```bash
-python scripts/shodanscan.py
+python scripts/TerminalAI.py
 ```
 
-The script uses Python's built-in logging module to report its progress. By
-default it logs informational messages; pass `--verbose` to enable debug level
-output:
+The client loads servers from `data/endpoints.csv`, pings them to sort by latency, and stores conversations under `data/conversations`. Logs produced with the `/print` command are written to `data/logs`.
+
+### Shodan Scan
+
+Scan for new Ollama servers and verify existing ones:
 
 ```bash
-python scripts/shodanscan.py --verbose
+python scripts/shodanscan.py [--verbose] [--limit N] [--existing-limit N]
 ```
 
-By default results from each Shodan query are limited to 25 new endpoints.
-Use `--limit` to change how many fresh results are appended per query.
-Existing entries are checked starting with the oldest `last_check_date`; adjust
-`--existing-limit` to control how many are verified on each run.
+The script requires a Shodan API key. Results are appended to `data/endpoints.csv` and enriched with metadata such as hostnames, organisation, ISP, and location. Existing entries are checked for availability and ping time.
+
+## Development
+
+Run a basic syntax check on all Python scripts:
 
 ```bash
-python scripts/shodanscan.py --limit 50 --existing-limit 25
+python -m py_compile scripts/*.py
 ```
 
-The script requires the `shodan` and `pandas` packages. It also enriches each
-entry with metadata provided by Shodan such as hostnames, organisation, ISP and
-geolocation (city, region, country and coordinates) so the CSV remains as
-informative as possible.
+## Data Layout
+
+- `data/endpoints.csv` – list of known endpoints.
+- `data/conversations/` – per-model conversation history.
+- `data/logs/` – saved transcripts.
+- `data/config.json` – optional configuration (`SHODAN_API_KEY`).
+
+## License
+
+This project is provided as-is without any warranty. Use it responsibly.
