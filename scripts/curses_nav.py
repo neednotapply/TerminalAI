@@ -21,17 +21,24 @@ def interactive_menu(header: str, options: list[str]) -> int | None:
         curses.curs_set(0)
         idx = 0
         offset = 0
+        header_lines = header.split("\n") if header else []
+        header_height = len(header_lines)
         while True:
             stdscr.erase()
-            stdscr.addstr(0, 0, header)
             rows, cols = stdscr.getmaxyx()
-            view_height = max(1, rows - 2)
+            # draw header centered
+            for i, line in enumerate(header_lines):
+                x = max((cols - len(line)) // 2, 0)
+                stdscr.addstr(i, x, line)
+            view_height = max(1, rows - header_height - 1)
             visible = options[offset:offset + view_height]
             for i, opt in enumerate(visible):
                 actual = offset + i
                 marker = "> " if actual == idx else "  "
+                text = marker + opt
+                x = max((cols - len(text)) // 2, 0)
                 attr = curses.A_BOLD if actual == idx else curses.A_NORMAL
-                stdscr.addstr(i + 1, 0, marker + opt, attr)
+                stdscr.addstr(header_height + i, x, text, attr)
             key = stdscr.getch()
             if key == curses.KEY_UP:
                 idx = (idx - 1) % len(options)
