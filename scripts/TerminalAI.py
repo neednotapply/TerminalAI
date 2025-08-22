@@ -87,31 +87,46 @@ def stop_thinking_timer(start, stop_event, timed_out=False):
 
 
 def get_input(prompt):
+    """Read a line of input allowing basic arrow-key navigation."""
     if os.name == "nt":
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        buf = ""
+        buf = []
+        pos = 0
         while True:
             ch = msvcrt.getwch()
             if ch in ("\r", "\n"):
                 print()
-                return buf.strip()
-            elif ch == "\b":
-                if buf:
-                    buf = buf[:-1]
-                    sys.stdout.write("\b \b")
-                    sys.stdout.flush()
-            elif ch in ("\x00", "\xe0"):
-                # Consume special keys like arrows without affecting input
-                msvcrt.getwch()
-                continue
-            elif ch == "\x1b":
+                return "".join(buf).strip()
+            if ch == "\x1b":
                 print()
                 return "ESC"
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                if ch2 == "K":  # left
+                    if pos > 0:
+                        sys.stdout.write("\b")
+                        pos -= 1
+                elif ch2 == "M":  # right
+                    if pos < len(buf):
+                        sys.stdout.write(buf[pos])
+                        pos += 1
+                elif ch2 in ("H", "P"):
+                    # ignore up/down
+                    pass
+                continue
+            if ch == "\b":
+                if pos > 0:
+                    pos -= 1
+                    del buf[pos]
+                    sys.stdout.write("\b" + "".join(buf[pos:]) + " ")
+                    sys.stdout.write("\b" * (len(buf) - pos + 1))
             else:
-                buf += ch
-                sys.stdout.write(ch)
-                sys.stdout.flush()
+                buf.insert(pos, ch)
+                sys.stdout.write("".join(buf[pos:]))
+                pos += 1
+                sys.stdout.write("\b" * (len(buf) - pos))
+            sys.stdout.flush()
     else:
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
@@ -119,35 +134,51 @@ def get_input(prompt):
             tty.setcbreak(fd)
             sys.stdout.write(prompt)
             sys.stdout.flush()
-            buf = ""
+            buf = []
+            pos = 0
             while True:
-                rlist, _, _ = select.select([sys.stdin], [], [], None)
-                if rlist:
-                    ch = sys.stdin.read(1)
-                    if ch in ("\n", "\r"):
-                        print()
-                        return buf.strip()
-                    elif ch == "\x7f":
-                        if buf:
-                            buf = buf[:-1]
-                            sys.stdout.write("\b \b")
+                ch = sys.stdin.read(1)
+                if ch in ("\n", "\r"):
+                    print()
+                    return "".join(buf).strip()
+                if ch == "\x7f":  # backspace
+                    if pos > 0:
+                        pos -= 1
+                        del buf[pos]
+                        sys.stdout.write("\b" + "".join(buf[pos:]) + " ")
+                        sys.stdout.write("\b" * (len(buf) - pos + 1))
+                    sys.stdout.flush()
+                    continue
+                if ch == "\x1b":
+                    seq = ""
+                    while True:
+                        dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                        if dr:
+                            seq += sys.stdin.read(1)
+                        else:
+                            break
+                    if seq.endswith("C"):  # right
+                        if pos < len(buf):
+                            sys.stdout.write(buf[pos])
+                            pos += 1
                             sys.stdout.flush()
-                    elif ch == "\x1b":
-                        seq = ""
-                        while True:
-                            dr, _, _ = select.select([sys.stdin], [], [], 0.05)
-                            if dr:
-                                seq += sys.stdin.read(1)
-                            else:
-                                break
-                        if seq.endswith(("A", "B", "C", "D")):
-                            continue
-                        print()
-                        return "ESC"
-                    else:
-                        buf += ch
-                        sys.stdout.write(ch)
-                        sys.stdout.flush()
+                        continue
+                    if seq.endswith("D"):  # left
+                        if pos > 0:
+                            sys.stdout.write("\b")
+                            pos -= 1
+                            sys.stdout.flush()
+                        continue
+                    if seq.endswith(("A", "B")):
+                        # ignore up/down
+                        continue
+                    print()
+                    return "ESC"
+                buf.insert(pos, ch)
+                sys.stdout.write("".join(buf[pos:]))
+                pos += 1
+                sys.stdout.write("\b" * (len(buf) - pos))
+                sys.stdout.flush()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -180,15 +211,21 @@ def get_key():
             if ch == "\x1b":
                 seq = ""
                 while True:
-                    dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.2)
                     if dr:
                         seq += sys.stdin.read(1)
+                        if seq[-1] in "ABCD":
+                            break
                     else:
                         break
                 if seq.endswith("A"):
                     return "UP"
                 if seq.endswith("B"):
                     return "DOWN"
+                if seq.endswith("C"):
+                    return "RIGHT"
+                if seq.endswith("D"):
+                    return "LEFT"
                 return "ESC"
             if ch in ("\n", "\r"):
                 return "ENTER"
