@@ -1,6 +1,6 @@
 # TerminalAI
 
-TerminalAI is a retro-styled client for chatting with Ollama models and for discovering new public instances via Shodan. A matrix rain launcher provides a unified entry point on Linux, macOS, and Windows.
+TerminalAI is a retro-styled client for chatting with Ollama models and for discovering new public instances via Shodan. A launcher provides a unified entry point on Linux, macOS, and Windows.
 
 ## Installation
 
