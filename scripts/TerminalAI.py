@@ -16,6 +16,8 @@ from rain import rain
 if os.name == "nt":
     import msvcrt
 else:
+    import curses
+    import curses.textpad
     import termios
     import tty
 
@@ -84,20 +86,6 @@ def stop_thinking_timer(start, stop_event, timed_out=False):
         f"\r{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){status}{RESET}"
     )
     return elapsed
-
-
-def _read_escape_sequence(initial_timeout: float = 0.25) -> str:
-    """Read characters following an ESC to capture full arrow sequences."""
-    seq = ""
-    dr, _, _ = select.select([sys.stdin], [], [], initial_timeout)
-    if dr:
-        seq += sys.stdin.read(1)
-        while True:
-            dr, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if not dr:
-                break
-            seq += sys.stdin.read(1)
-    return seq
 
 
 def get_input(prompt):
@@ -264,6 +252,12 @@ def interactive_menu(header, options):
             offset = idx
         elif idx >= offset + view_height:
             offset = idx - view_height + 1
+
+
+if os.name != "nt":
+    from curses_nav import get_input as curses_get_input, interactive_menu as curses_menu
+    get_input = curses_get_input
+    interactive_menu = curses_menu
 
 
 def confirm_exit():
