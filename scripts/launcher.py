@@ -3,6 +3,8 @@
 import os
 import subprocess
 import sys
+import shutil
+import threading
 
 HEADER_LINES = [
     "████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗      █████╗ ██╗",
@@ -20,6 +22,7 @@ if os.name == "nt":
     import msvcrt
 else:
     from curses_nav import interactive_menu
+    from rain import rain
 
 
 def run_verbose() -> int | None:
@@ -61,7 +64,29 @@ def run_windows_menu() -> int | None:
 def run_unix_menu() -> int | None:
     """Use curses-based menu on Unix-like systems."""
     header = "\n".join(HEADER_LINES)
-    return interactive_menu(header, OPTIONS)
+    columns, _ = shutil.get_terminal_size(fallback=(80, 24))
+    max_width = max(len(line) for line in HEADER_LINES + [f"> {o}" for o in OPTIONS])
+    start_col = max((columns - max_width) // 2, 0) + 1
+    stop_event = threading.Event()
+    rain_thread = threading.Thread(
+        target=rain,
+        kwargs={
+            "persistent": True,
+            "stop_event": stop_event,
+            "box_top": 1,
+            "box_bottom": len(HEADER_LINES) + len(OPTIONS),
+            "box_left": start_col,
+            "box_right": start_col + max_width - 1,
+            "clear_screen": False,
+        },
+        daemon=True,
+    )
+    rain_thread.start()
+    try:
+        return interactive_menu(header, OPTIONS)
+    finally:
+        stop_event.set()
+        rain_thread.join()
 
 
 def main() -> None:
