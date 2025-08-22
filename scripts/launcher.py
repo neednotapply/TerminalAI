@@ -47,14 +47,33 @@ def draw_box(top: int, left: int, width: int, height: int) -> None:
     print(f"\033[{top + height};{left + 1}H└{horiz}┘{RESET}", end="")
 
 
-def print_options(box_top: int, box_left: int, options, idx: int) -> None:
-    for i, opt in enumerate(options):
-        marker = "> " if i == idx else "  "
-        line = f"{BOLD}{opt}{RESET}" if i == idx else opt
-        print(
-            f"\033[{box_top + 2 + i};{box_left + 3}H{GREEN}{marker}{line}{RESET}",
-            end="",
-        )
+def print_options(
+    box_top: int,
+    box_left: int,
+    box_width: int,
+    options,
+    idx: int,
+    offset: int,
+    view_height: int,
+) -> None:
+    inner_width = box_width - 4
+    for i in range(view_height):
+        y = box_top + 2 + i
+        pos = offset + i
+        if pos < len(options):
+            opt = options[pos]
+            marker = "> " if pos == idx else "  "
+            line = f"{BOLD}{opt}{RESET}" if pos == idx else opt
+            content = f"{marker}{line}".ljust(inner_width)
+            print(
+                f"\033[{y};{box_left + 3}H{GREEN}{content}{RESET}",
+                end="",
+            )
+        else:
+            print(
+                f"\033[{y};{box_left + 3}H{' ' * inner_width}",
+                end="",
+            )
 
 
 def print_options_verbose(box_top: int, box_left: int, options) -> None:
@@ -117,15 +136,16 @@ def get_key():
             tty.setcbreak(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                if select.select([sys.stdin], [], [], 0.01)[0]:
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == "[":
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == "A":
-                            return "UP"
-                        if ch3 == "B":
-                            return "DOWN"
-                    return "ESC"
+                # Read the rest of the escape sequence without blocking
+                seq = ""
+                while select.select([sys.stdin], [], [], 0.01)[0]:
+                    seq += sys.stdin.read(1)
+                if seq:
+                    final = seq[-1]
+                    if final == "A":
+                        return "UP"
+                    if final == "B":
+                        return "DOWN"
                 return "ESC"
             if ch in ("\n", "\r"):
                 return "ENTER"
@@ -136,10 +156,14 @@ def get_key():
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def interactive_choice(box_top: int, box_left: int, options) -> int | None:
+def interactive_choice(
+    box_top: int, box_left: int, box_width: int, box_height: int, options
+) -> int | None:
     idx = 0
+    offset = 0
+    view_height = box_height - 2
     while True:
-        print_options(box_top, box_left, options, idx)
+        print_options(box_top, box_left, box_width, options, idx, offset, view_height)
         sys.stdout.flush()
         key = get_key()
         if key == "UP":
@@ -150,6 +174,10 @@ def interactive_choice(box_top: int, box_left: int, options) -> int | None:
             return idx
         elif key == "ESC":
             return None
+        if idx < offset:
+            offset = idx
+        elif idx >= offset + view_height:
+            offset = idx - view_height + 1
 
 
 def main() -> None:
@@ -201,7 +229,7 @@ def main() -> None:
             sys.stdout.flush()
             choice = read_choice()
         else:
-            choice = interactive_choice(box_top, box_left, options)
+            choice = interactive_choice(box_top, box_left, box_width, box_height, options)
     finally:
         stop_event.set()
         rain_thread.join()

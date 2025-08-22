@@ -133,15 +133,13 @@ def get_input(prompt):
                             sys.stdout.write("\b \b")
                             sys.stdout.flush()
                     elif ch == "\x1b":
-                        # Ignore arrow key escape sequences but handle standalone ESC
-                        if select.select([sys.stdin], [], [], 0.01)[0]:
-                            ch2 = sys.stdin.read(1)
-                            if ch2 == "[":
-                                # consume the rest of the sequence (e.g., arrow keys)
-                                while select.select([sys.stdin], [], [], 0.01)[0]:
-                                    sys.stdin.read(1)
-                                continue
-                            # not an arrow sequence; treat as ESC key
+                        # Gather the rest of the escape sequence, if any
+                        seq = ""
+                        while select.select([sys.stdin], [], [], 0.01)[0]:
+                            seq += sys.stdin.read(1)
+                        # Ignore common arrow-key sequences
+                        if seq and seq[-1] in "ABCD":
+                            continue
                         print()
                         return "ESC"
                     else:
@@ -178,15 +176,16 @@ def get_key():
             tty.setcbreak(fd)
             ch = sys.stdin.read(1)
             if ch == "\x1b":
-                if select.select([sys.stdin], [], [], 0.01)[0]:
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == "[":
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == "A":
-                            return "UP"
-                        if ch3 == "B":
-                            return "DOWN"
-                    return "ESC"
+                # Read the rest of the escape sequence without blocking
+                seq = ""
+                while select.select([sys.stdin], [], [], 0.01)[0]:
+                    seq += sys.stdin.read(1)
+                if seq:
+                    final = seq[-1]
+                    if final == "A":
+                        return "UP"
+                    if final == "B":
+                        return "DOWN"
                 return "ESC"
             if ch in ("\n", "\r"):
                 return "ENTER"
@@ -199,12 +198,18 @@ def get_key():
 
 def interactive_menu(header, options):
     idx = 0
+    offset = 0
     while True:
         clear_screen()
         print(f"{CYAN}{header}{RESET}")
-        for i, opt in enumerate(options):
-            marker = f"{YELLOW}> {RESET}" if i == idx else "  "
-            line = f"{BOLD}{opt}{RESET}" if i == idx else opt
+        rows = shutil.get_terminal_size(fallback=(80, 24)).lines
+        view_height = max(1, rows - 2)
+        end = offset + view_height
+        visible = options[offset:end]
+        for i, opt in enumerate(visible):
+            actual = offset + i
+            marker = f"{YELLOW}> {RESET}" if actual == idx else "  "
+            line = f"{BOLD}{opt}{RESET}" if actual == idx else opt
             print(f"{marker}{line}")
         key = get_key()
         if key == "UP":
@@ -215,6 +220,10 @@ def interactive_menu(header, options):
             return idx
         elif key == "ESC":
             return None
+        if idx < offset:
+            offset = idx
+        elif idx >= offset + view_height:
+            offset = idx - view_height + 1
 
 
 def confirm_exit():
