@@ -138,15 +138,21 @@ def get_key():
             if ch == "\x1b":
                 seq = ""
                 while True:
-                    dr, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    dr, _, _ = select.select([sys.stdin], [], [], 0.2)
                     if dr:
                         seq += sys.stdin.read(1)
+                        if seq[-1] in "ABCD":
+                            break
                     else:
                         break
                 if seq.endswith("A"):
                     return "UP"
                 if seq.endswith("B"):
                     return "DOWN"
+                if seq.endswith("C"):
+                    return "RIGHT"
+                if seq.endswith("D"):
+                    return "LEFT"
                 return "ESC"
             if ch in ("\n", "\r"):
                 return "ENTER"
