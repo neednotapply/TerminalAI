@@ -5,6 +5,7 @@ import subprocess
 import sys
 import shutil
 import threading
+import time
 
 GREEN = "\033[38;2;5;249;0m"
 RESET = "\033[0m"
@@ -72,34 +73,42 @@ def run_windows_menu() -> int | None:
     rain_thread.start()
 
     idx = 0
+
+    def draw_menu() -> None:
+        os.system("cls")
+        print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
+        for line in HEADER_LINES:
+            print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
+        print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
+
+        for _ in range(max(0, menu_y - header_h)):
+            print()
+        print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
+        for i, opt in enumerate(OPTIONS):
+            prefix = "> " if i == idx else "  "
+            line = prefix + opt
+            print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
+        print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+
     try:
+        draw_menu()
         while True:
-            os.system("cls")
-            print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
-            for line in HEADER_LINES:
-                print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
-            print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
-
-            for _ in range(max(0, menu_y - header_h)):
-                print()
-            print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
-            for i, opt in enumerate(OPTIONS):
-                prefix = "> " if i == idx else "  "
-                line = prefix + opt
-                print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
-            print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
-
-            ch = msvcrt.getwch()
-            if ch in ("\r", "\n"):
-                return idx
-            if ch == "\x1b":
-                return None
-            if ch in ("\x00", "\xe0"):
-                ch2 = msvcrt.getwch()
-                if ch2 == "H":
-                    idx = (idx - 1) % len(OPTIONS)
-                elif ch2 == "P":
-                    idx = (idx + 1) % len(OPTIONS)
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    return idx
+                if ch == "\x1b":
+                    return None
+                if ch in ("\x00", "\xe0"):
+                    ch2 = msvcrt.getwch()
+                    if ch2 == "H":
+                        idx = (idx - 1) % len(OPTIONS)
+                        draw_menu()
+                    elif ch2 == "P":
+                        idx = (idx + 1) % len(OPTIONS)
+                        draw_menu()
+            else:
+                time.sleep(0.05)
     finally:
         stop_event.set()
         rain_thread.join()
