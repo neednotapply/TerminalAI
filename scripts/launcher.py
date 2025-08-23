@@ -136,14 +136,19 @@ def run_unix_menu() -> int | None:
         },
     ]
     stop_event = threading.Event()
-    rain_thread = threading.Thread(
-        target=rain,
-        kwargs={"persistent": True, "stop_event": stop_event, "boxes": boxes, "clear_screen": False},
-        daemon=True,
-    )
-    rain_thread.start()
 
     def _menu(stdscr):
+        rain_thread = threading.Thread(
+            target=rain,
+            kwargs={
+                "persistent": True,
+                "stop_event": stop_event,
+                "boxes": boxes,
+                "clear_screen": False,
+            },
+            daemon=True,
+        )
+        rain_thread.start()
         curses.curs_set(0)
         curses.start_color()
         try:
@@ -156,45 +161,52 @@ def run_unix_menu() -> int | None:
             curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
         green = curses.color_pair(1)
         idx = 0
-        while True:
-            stdscr.erase()
-            _, cols = stdscr.getmaxyx()
-            # draw header box at top
-            header_win = curses.newwin(header_h, header_w, 0, max((cols - header_w) // 2, 0))
-            header_win.attron(green)
-            header_win.border()
-            header_win.attroff(green)
-            for i, line in enumerate(HEADER_LINES, 1):
-                header_win.addstr(i, (header_w - len(line)) // 2, line, green)
-            header_win.refresh()
+        result = None
+        try:
+            while True:
+                stdscr.erase()
+                _, cols = stdscr.getmaxyx()
+                # draw header box at top
+                header_win = curses.newwin(header_h, header_w, 0, max((cols - header_w) // 2, 0))
+                header_win.attron(green)
+                header_win.border()
+                header_win.attroff(green)
+                for i, line in enumerate(HEADER_LINES, 1):
+                    header_win.addstr(i, (header_w - len(line)) // 2, line, green)
+                header_win.refresh()
 
-            # draw menu box centered
-            menu_win = curses.newwin(menu_h, menu_w, menu_y, menu_x)
-            menu_win.attron(green)
-            menu_win.border()
-            menu_win.attroff(green)
-            for i, opt in enumerate(OPTIONS):
-                marker = "> " if i == idx else "  "
-                text = marker + opt
-                attr = curses.A_BOLD if i == idx else curses.A_NORMAL
-                menu_win.addstr(1 + i, 1, text.ljust(menu_w - 2), green | attr)
-            menu_win.refresh()
+                # draw menu box centered
+                menu_win = curses.newwin(menu_h, menu_w, menu_y, menu_x)
+                menu_win.attron(green)
+                menu_win.border()
+                menu_win.attroff(green)
+                for i, opt in enumerate(OPTIONS):
+                    marker = "> " if i == idx else "  "
+                    text = marker + opt
+                    attr = curses.A_BOLD if i == idx else curses.A_NORMAL
+                    menu_win.addstr(1 + i, 1, text.ljust(menu_w - 2), green | attr)
+                menu_win.refresh()
 
-            key = stdscr.getch()
-            if key == curses.KEY_UP:
-                idx = (idx - 1) % len(OPTIONS)
-            elif key == curses.KEY_DOWN:
-                idx = (idx + 1) % len(OPTIONS)
-            elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
-                return idx
-            elif key == 27:
-                return None
+                key = stdscr.getch()
+                if key == curses.KEY_UP:
+                    idx = (idx - 1) % len(OPTIONS)
+                elif key == curses.KEY_DOWN:
+                    idx = (idx + 1) % len(OPTIONS)
+                elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
+                    result = idx
+                    break
+                elif key == 27:
+                    result = None
+                    break
+        finally:
+            stop_event.set()
+            rain_thread.join()
+        return result
 
     try:
         return curses.wrapper(_menu)
     finally:
         stop_event.set()
-        rain_thread.join()
 
 
 def main() -> None:
