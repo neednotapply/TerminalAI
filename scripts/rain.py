@@ -95,7 +95,7 @@ def rain(
             time.sleep(0.08)
             if stop_event is not None and stop_event.is_set():
                 break
-            if persistent and (stop_event is None or not stop_event.is_set()):
+            if persistent and stop_event is None:
                 if os.name == "nt":
                     if msvcrt.kbhit():
                         msvcrt.getch()
