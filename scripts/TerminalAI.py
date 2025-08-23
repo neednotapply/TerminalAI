@@ -68,7 +68,7 @@ def start_thinking_timer():
         while not stop_event.is_set():
             elapsed = int(time.time() - start)
             print(
-                f"\r{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){RESET}",
+                f"\r\033[K{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){RESET}",
                 end="",
                 flush=True,
             )
@@ -83,7 +83,7 @@ def stop_thinking_timer(start, stop_event, timed_out=False):
     elapsed = int(time.time() - start)
     status = " [Timed out]" if timed_out else ""
     print(
-        f"\r{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){status}{RESET}"
+        f"\r\033[K{AI_COLOR}\U0001f5a5️ : Thinking... ({elapsed}s){status}{RESET}"
     )
     return elapsed
 

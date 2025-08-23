@@ -23,6 +23,7 @@ VERBOSE = "--verbose" in sys.argv
 
 if os.name == "nt":
     import msvcrt
+    from rain import rain
 else:
     import curses
     from rain import rain
@@ -43,42 +44,65 @@ def run_verbose() -> int | None:
 
 def run_windows_menu() -> int | None:
     """Interactive menu using msvcrt for Windows with boxed layout."""
+    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+    header_w = max(len(line) for line in HEADER_LINES) + 2
+    header_x = max((columns - header_w) // 2, 0)
+    header_h = len(HEADER_LINES) + 2
+
+    menu_w = max(len(opt) + 2 for opt in OPTIONS) + 2
+    menu_h = len(OPTIONS) + 2
+    menu_x = max((columns - menu_w) // 2, 0)
+    menu_y = max((rows - menu_h) // 2, 0)
+
+    boxes = [
+        {"top": 1, "bottom": header_h, "left": header_x + 1, "right": header_x + header_w},
+        {
+            "top": menu_y + 1,
+            "bottom": menu_y + menu_h,
+            "left": menu_x + 1,
+            "right": menu_x + menu_w,
+        },
+    ]
+    stop_event = threading.Event()
+    rain_thread = threading.Thread(
+        target=rain,
+        kwargs={"persistent": True, "stop_event": stop_event, "boxes": boxes, "clear_screen": False},
+        daemon=True,
+    )
+    rain_thread.start()
+
     idx = 0
-    while True:
-        os.system("cls")
-        columns, rows = shutil.get_terminal_size(fallback=(80, 24))
-        header_w = max(len(line) for line in HEADER_LINES) + 2
-        header_x = max((columns - header_w) // 2, 0)
-        header_h = len(HEADER_LINES) + 2
-        print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
-        for line in HEADER_LINES:
-            print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
-        print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
+    try:
+        while True:
+            os.system("cls")
+            print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
+            for line in HEADER_LINES:
+                print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
+            print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
 
-        menu_w = max(len(opt) + 2 for opt in OPTIONS) + 2
-        menu_h = len(OPTIONS) + 2
-        menu_x = max((columns - menu_w) // 2, 0)
-        menu_y = max((rows - menu_h) // 2, 0)
-        for _ in range(max(0, menu_y - header_h)):
-            print()
-        print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
-        for i, opt in enumerate(OPTIONS):
-            prefix = "> " if i == idx else "  "
-            line = prefix + opt
-            print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
-        print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+            for _ in range(max(0, menu_y - header_h)):
+                print()
+            print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
+            for i, opt in enumerate(OPTIONS):
+                prefix = "> " if i == idx else "  "
+                line = prefix + opt
+                print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
+            print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
 
-        ch = msvcrt.getwch()
-        if ch in ("\r", "\n"):
-            return idx
-        if ch == "\x1b":
-            return None
-        if ch in ("\x00", "\xe0"):
-            ch2 = msvcrt.getwch()
-            if ch2 == "H":
-                idx = (idx - 1) % len(OPTIONS)
-            elif ch2 == "P":
-                idx = (idx + 1) % len(OPTIONS)
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                return idx
+            if ch == "\x1b":
+                return None
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                if ch2 == "H":
+                    idx = (idx - 1) % len(OPTIONS)
+                elif ch2 == "P":
+                    idx = (idx + 1) % len(OPTIONS)
+    finally:
+        stop_event.set()
+        rain_thread.join()
 
 
 def run_unix_menu() -> int | None:
@@ -174,6 +198,8 @@ def main() -> None:
         return
     script_dir = os.path.dirname(os.path.abspath(__file__))
     target = "TerminalAI.py" if choice == 0 else "shodanscan.py"
+    if choice == 1:
+        os.system("cls" if os.name == "nt" else "clear")
     subprocess.call([sys.executable, os.path.join(script_dir, target), *args])
 
 
