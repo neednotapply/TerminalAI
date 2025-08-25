@@ -351,7 +351,8 @@ def load_conversation(model, file):
     for i in range(0, len(messages), 2):
         user = messages[i].get("content", "") if i < len(messages) else ""
         ai = messages[i + 1].get("content", "") if i + 1 < len(messages) else ""
-        history.append({"user": user, "ai": ai})
+        elapsed = messages[i + 1].get("elapsed") if i + 1 < len(messages) else None
+        history.append({"user": user, "ai": ai, "elapsed": elapsed})
     return messages, history, context
 
 def save_conversation(model, file, messages, context=None):
@@ -521,7 +522,10 @@ def render_markdown(text):
     for ln in lines:
         s = ln.strip()
         if s.startswith("<think>"):
-            print(f"{YELLOW}{BOLD} Thinking...{RESET}")
+            # Skip over any internal reasoning blocks without
+            # emitting an extra "Thinking..." line. The thinking
+            # timer already communicates that status to the user,
+            # and showing it here causes duplicate output.
             in_think = True
             continue
         if s.endswith("</think>"):
@@ -545,7 +549,9 @@ def render_markdown(text):
 def reprint_history(history):
     for e in history:
         print(f"🧑 : {e['user']}")
-        print(f"{AI_COLOR}🖥️ : ",end='')
+        wait = e.get("elapsed")
+        prefix = f"{AI_COLOR}🖥️ ({wait}s) : " if wait is not None else f"{AI_COLOR}🖥️ : "
+        print(prefix, end="")
         render_markdown(e['ai'])
 
 def select_conversation(model):
@@ -686,7 +692,13 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     fn = LOG_DIR / f"chat_{ts}.txt"
                     with fn.open("w", encoding="utf-8") as f:
                         for h in history:
-                            f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
+                            elapsed = h.get("elapsed")
+                            if elapsed is None:
+                                f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
+                            else:
+                                f.write(
+                                    f"User: {h['user']}\nAI ({elapsed}s): {h['ai']}\n\n"
+                                )
                     print(f"{YELLOW}Saved to {fn}{RESET}")
                 else:
                     print(f"{RED}No history{RESET}")
@@ -835,12 +847,14 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 return "server_inactive"
 
             if not timed_out and resp:
-                print("\r\033[K", end='')
-                print(f"{AI_COLOR}\U0001f5a5️ : ", end='')
+                print("\r\033[K", end="")
+                print(f"{AI_COLOR}\U0001f5a5️ : ", end="")
                 render_markdown(resp)
                 messages.append({"role": "user", "content": user_input})
-                messages.append({"role": "assistant", "content": resp})
-                history.append({"user": user_input, "ai": resp})
+                messages.append(
+                    {"role": "assistant", "content": resp, "elapsed": elapsed}
+                )
+                history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
                 save_conversation(model, conv_file, messages, context)
 
     except KeyboardInterrupt:
@@ -853,7 +867,13 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 fn = LOG_DIR / f"chat_{ts}.txt"
                 with fn.open("w", encoding="utf-8") as f:
                     for h in history:
-                        f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
+                        elapsed = h.get("elapsed")
+                        if elapsed is None:
+                            f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
+                        else:
+                            f.write(
+                                f"User: {h['user']}\nAI ({elapsed}s): {h['ai']}\n\n"
+                            )
                 print(f"Saved to {fn}")
 
 # Main loop
