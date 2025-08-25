@@ -48,9 +48,9 @@ def rain(
     stdin_is_tty = sys.stdin.isatty()
     try:
         if use_alt_screen:
-            print("\033[?1049h\033[?25l", end="")
+            print("\033[?1049h\033[?25l", end="", flush=True)
         else:
-            print("\033[?25l", end="")
+            print("\033[?25l", end="", flush=True)
             if clear_screen:
                 os.system("cls" if os.name == "nt" else "clear")
         end_time = time.time() + duration if not persistent else None
@@ -114,11 +114,11 @@ def rain(
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         time.sleep(0.5)
         if use_alt_screen:
-            print("\033[?25h\033[?1049l", end="")
+            print("\033[?25h\033[?1049l", end="", flush=True)
         elif clear_screen:
-            print("\033[0m\033[2J\033[H\033[?25h", end="")
+            print("\033[0m\033[2J\033[H\033[?25h", end="", flush=True)
         else:
-            print("\033[0m\033[?25h", end="")
+            print("\033[0m\033[?25h", end="", flush=True)
 
 
 def main():
