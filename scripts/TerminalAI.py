@@ -609,11 +609,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 while True:
                     if time.time() - start > IDLE_TIMEOUT:
                         if not VERBOSE:
-                            rain(persistent=True)
-                            redraw_ui(model)
-                            reprint_history(history)
-                            sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
-                            sys.stdout.flush()
+                            rain(persistent=True, use_alt_screen=True)
                         start = time.time()
                     if msvcrt.kbhit():
                         ch = msvcrt.getwch()
@@ -646,11 +642,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     while True:
                         if time.time() - start > IDLE_TIMEOUT:
                             if not VERBOSE:
-                                rain(persistent=True)
-                                redraw_ui(model)
-                                reprint_history(history)
-                                sys.stdout.write(f"{RESET}\U0001f9d1 : {user_input}")
-                                sys.stdout.flush()
+                                rain(persistent=True, use_alt_screen=True)
                                 tty.setcbreak(fd)
                             start = time.time()
                         rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
