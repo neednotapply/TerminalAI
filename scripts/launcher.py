@@ -6,7 +6,6 @@ import sys
 import shutil
 import threading
 import time
-import random
 
 GREEN = "\033[38;2;5;249;0m"
 RESET = "\033[0m"
@@ -27,7 +26,9 @@ if os.name == "nt":
     import msvcrt
     from rain import rain
 else:
-    import curses
+    import termios
+    import tty
+    import select
     from rain import rain
 
 
@@ -116,99 +117,88 @@ def run_windows_menu() -> int | None:
 
 
 def run_unix_menu() -> int | None:
-    """Use curses-based menu on Unix-like systems with boxed logo and menu."""
+    """Interactive menu for Unix-like systems with matrix rain."""
 
-    charset = (
-        "01$#*+=-░▒▓▌▐▄▀▁▂▃▅▆▇█ﾊﾐﾋｰｱｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ"
-        "01$#*+=-"
+    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+    header_w = max(len(line) for line in HEADER_LINES) + 2
+    header_x = max((columns - header_w) // 2, 0)
+    header_h = len(HEADER_LINES) + 2
+
+    menu_w = max(len(opt) + 2 for opt in OPTIONS) + 2
+    menu_h = len(OPTIONS) + 2
+    menu_x = max((columns - menu_w) // 2, 0)
+    menu_y = max((rows - menu_h) // 2, 0)
+
+    boxes = [
+        {"top": 1, "bottom": header_h, "left": header_x + 1, "right": header_x + header_w},
+        {
+            "top": menu_y + 1,
+            "bottom": menu_y + menu_h,
+            "left": menu_x + 1,
+            "right": menu_x + menu_w,
+        },
+    ]
+
+    stop_event = threading.Event()
+    rain_thread = threading.Thread(
+        target=rain,
+        kwargs={"persistent": True, "stop_event": stop_event, "boxes": boxes, "clear_screen": False},
+        daemon=True,
     )
+    rain_thread.start()
 
-    def _menu(stdscr):
-        curses.curs_set(0)
-        curses.start_color()
-        try:
-            if curses.can_change_color():
-                curses.init_color(10, 20, 976, 0)
-                curses.init_pair(1, 10, curses.COLOR_BLACK)
-            else:
-                curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
-        except curses.error:
-            curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
-        green = curses.color_pair(1)
-        idx = 0
-        stdscr.nodelay(True)
-        rows, cols = stdscr.getmaxyx()
-        trail_length = 6
-        drops = [random.randint(0, rows) for _ in range(cols)]
-        result = None
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+
+    idx = 0
+
+    def draw_menu() -> None:
+        os.system("clear")
+        print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
+        for line in HEADER_LINES:
+            print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
+        print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
+
+        for _ in range(max(0, menu_y - header_h)):
+            print()
+        print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
+        for i, opt in enumerate(OPTIONS):
+            prefix = "> " if i == idx else "  "
+            line = prefix + opt
+            print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
+        print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+
+    try:
+        draw_menu()
         while True:
-            rows, cols = stdscr.getmaxyx()
-            header_w = max(len(line) for line in HEADER_LINES) + 2
-            header_h = len(HEADER_LINES) + 2
-            header_x = max((cols - header_w) // 2, 0)
-            menu_w = max(len("> " + o) for o in OPTIONS) + 2
-            menu_h = len(OPTIONS) + 2
-            menu_x = max((cols - menu_w) // 2, 0)
-            menu_y = max((rows - menu_h) // 2, 0)
-            boxes = [
-                {"top": 0, "bottom": header_h - 1, "left": header_x, "right": header_x + header_w - 1},
-                {
-                    "top": menu_y,
-                    "bottom": menu_y + menu_h - 1,
-                    "left": menu_x,
-                    "right": menu_x + menu_w - 1,
-                },
-            ]
-            stdscr.erase()
-            for col in range(cols):
-                drop_pos = drops[col]
-                for t in range(trail_length):
-                    y = drop_pos - t
-                    if 0 <= y < rows:
-                        if any(
-                            b["top"] <= y <= b["bottom"]
-                            and b["left"] <= col <= b["right"]
-                            for b in boxes
-                        ):
-                            continue
-                        ch = random.choice(charset) if t < 4 else " "
-                        stdscr.addstr(y, col, ch, green)
-                drops[col] = (drops[col] + 1) % (rows + trail_length)
+            r, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if r:
+                ch = os.read(fd, 1).decode()
+                if ch in ("\n", "\r"):
+                    return idx
+                if ch == "\x1b":
+                    r2, _, _ = select.select([sys.stdin], [], [], 0.0001)
+                    if r2:
+                        ch2 = os.read(fd, 1).decode()
+                        if ch2 == "[":
+                            ch3 = os.read(fd, 1).decode()
+                            if ch3 == "A":
+                                idx = (idx - 1) % len(OPTIONS)
+                                draw_menu()
+                            elif ch3 == "B":
+                                idx = (idx + 1) % len(OPTIONS)
+                                draw_menu()
+                        else:
+                            return None
+                    else:
+                        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        stop_event.set()
+        rain_thread.join()
 
-            header_win = curses.newwin(header_h, header_w, 0, header_x)
-            header_win.attron(green)
-            header_win.border()
-            header_win.attroff(green)
-            for i, line in enumerate(HEADER_LINES, 1):
-                header_win.addstr(i, (header_w - len(line)) // 2, line, green)
-            header_win.refresh()
-
-            menu_win = curses.newwin(menu_h, menu_w, menu_y, menu_x)
-            menu_win.attron(green)
-            menu_win.border()
-            menu_win.attroff(green)
-            for i, opt in enumerate(OPTIONS):
-                marker = "> " if i == idx else "  "
-                text = marker + opt
-                attr = curses.A_BOLD if i == idx else curses.A_NORMAL
-                menu_win.addstr(1 + i, 1, text.ljust(menu_w - 2), green | attr)
-            menu_win.refresh()
-
-            key = stdscr.getch()
-            if key == curses.KEY_UP:
-                idx = (idx - 1) % len(OPTIONS)
-            elif key == curses.KEY_DOWN:
-                idx = (idx + 1) % len(OPTIONS)
-            elif key in (curses.KEY_ENTER, 10, 13, ord(" ")):
-                result = idx
-                break
-            elif key == 27:
-                result = None
-                break
-            time.sleep(0.08)
-        return result
-
-    return curses.wrapper(_menu)
+    return None
 
 
 def main() -> None:
