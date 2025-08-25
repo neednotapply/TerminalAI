@@ -9,6 +9,7 @@ import pandas as pd
 import shodan
 import socket
 import time
+import requests
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -84,6 +85,18 @@ def ping_time(ip, port):
         return None
 
 
+def check_ollama_api(ip, port):
+    """Check that the Ollama API responds on the given host and port."""
+    url = f"http://{ip}:{port}/api/tags"
+    try:
+        r = requests.get(url, timeout=2)
+        if r.status_code == 200:
+            return True, ""
+        return False, f"http {r.status_code}"
+    except requests.RequestException as e:
+        return False, str(e)
+
+
 def update_existing(api, df, batch_size):
     if df.empty:
         return df
@@ -149,9 +162,10 @@ def update_existing(api, df, batch_size):
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = "ping timeout"
         else:
+            api_ok, reason = check_ollama_api(ip, port)
             df.at[idx, "ping"] = latency
-            df.at[idx, "is_active"] = True
-            df.at[idx, "inactive_reason"] = ""
+            df.at[idx, "is_active"] = api_ok
+            df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
     return df
 
 
@@ -209,9 +223,10 @@ def find_new(api, df, limit):
                 new_df.at[idx, "is_active"] = False
                 new_df.at[idx, "inactive_reason"] = "ping timeout"
             else:
+                api_ok, reason = check_ollama_api(row["ip"], row["port"])
                 new_df.at[idx, "ping"] = latency
-                new_df.at[idx, "is_active"] = True
-                new_df.at[idx, "inactive_reason"] = ""
+                new_df.at[idx, "is_active"] = api_ok
+                new_df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
         new_df["ping"] = pd.to_numeric(new_df["ping"], errors="coerce")
         new_df.sort_values(by="ping", inplace=True, na_position="last")
         new_df = new_df.head(limit)
