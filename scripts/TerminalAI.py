@@ -554,9 +554,6 @@ def reprint_history(history):
             print(f"{AI_COLOR}🖥️ : Thinking... ({wait}s){RESET}")
         else:
             print(f"{AI_COLOR}🖥️ : {RESET}")
-        # Leave a blank line before the AI's actual reply so history
-        # mirrors the live chat output.
-        print()
         render_markdown(e['ai'])
 
 def select_conversation(model):
@@ -692,11 +689,11 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                             elapsed = h.get("elapsed")
                             if elapsed is None:
                                 f.write(
-                                    f"User: {h['user']}\nAI:\n\n{h['ai']}\n\n"
+                                    f"User: {h['user']}\nAI:\n{h['ai']}\n\n"
                                 )
                             else:
                                 f.write(
-                                    f"User: {h['user']}\nAI: Thinking... ({elapsed}s)\n\n{h['ai']}\n\n"
+                                    f"User: {h['user']}\nAI: Thinking... ({elapsed}s)\n{h['ai']}\n\n"
                                 )
                     print(f"{YELLOW}Saved to {fn}{RESET}")
                 else:
@@ -830,14 +827,6 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 server_failed = True
 
             elapsed = stop_thinking_timer(start, stop_event, timed_out)
-            # Provide a clean break between the thinking status line
-            # and the model's response. The previous implementation
-            # printed a secondary "Finished thinking" message and then
-            # redrew the AI prefix, which caused confusing output in
-            # both the live conversation and when reloading logs. We
-            # just add a blank line here so the response starts on its
-            # own line.
-            print()
 
             if server_failed:
                 try:
@@ -874,11 +863,11 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         elapsed = h.get("elapsed")
                         if elapsed is None:
                             f.write(
-                                f"User: {h['user']}\nAI:\n\n{h['ai']}\n\n"
+                                f"User: {h['user']}\nAI:\n{h['ai']}\n\n"
                             )
                         else:
                             f.write(
-                                f"User: {h['user']}\nAI: Thinking... ({elapsed}s)\n\n{h['ai']}\n\n"
+                                f"User: {h['user']}\nAI: Thinking... ({elapsed}s)\n{h['ai']}\n\n"
                             )
                 print(f"Saved to {fn}")
 
