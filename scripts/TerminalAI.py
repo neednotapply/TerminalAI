@@ -550,8 +550,13 @@ def reprint_history(history):
     for e in history:
         print(f"🧑 : {e['user']}")
         wait = e.get("elapsed")
-        prefix = f"{AI_COLOR}🖥️ ({wait}s) : " if wait is not None else f"{AI_COLOR}🖥️ : "
-        print(prefix, end="")
+        if wait is not None:
+            print(f"{AI_COLOR}🖥️ : Thinking... ({wait}s){RESET}")
+        else:
+            print(f"{AI_COLOR}🖥️ : {RESET}")
+        # Leave a blank line before the AI's actual reply so history
+        # mirrors the live chat output.
+        print()
         render_markdown(e['ai'])
 
 def select_conversation(model):
@@ -686,10 +691,12 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         for h in history:
                             elapsed = h.get("elapsed")
                             if elapsed is None:
-                                f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
+                                f.write(
+                                    f"User: {h['user']}\nAI:\n\n{h['ai']}\n\n"
+                                )
                             else:
                                 f.write(
-                                    f"User: {h['user']}\nAI ({elapsed}s): {h['ai']}\n\n"
+                                    f"User: {h['user']}\nAI: Thinking... ({elapsed}s)\n\n{h['ai']}\n\n"
                                 )
                     print(f"{YELLOW}Saved to {fn}{RESET}")
                 else:
@@ -823,10 +830,14 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 server_failed = True
 
             elapsed = stop_thinking_timer(start, stop_event, timed_out)
-            log_msg = (
-                f"Timed out after {elapsed}s" if timed_out else f"Finished thinking in {elapsed}s"
-            )
-            print(f"{YELLOW}{log_msg}{RESET}")
+            # Provide a clean break between the thinking status line
+            # and the model's response. The previous implementation
+            # printed a secondary "Finished thinking" message and then
+            # redrew the AI prefix, which caused confusing output in
+            # both the live conversation and when reloading logs. We
+            # just add a blank line here so the response starts on its
+            # own line.
+            print()
 
             if server_failed:
                 try:
@@ -839,8 +850,9 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 return "server_inactive"
 
             if not timed_out and resp:
-                print("\r\033[K", end="")
-                print(f"{AI_COLOR}\U0001f5a5️ : ", end="")
+                # Response prints without an extra AI prefix so that
+                # history and live conversation share the same
+                # formatting: a thinking line followed by the reply.
                 render_markdown(resp)
                 messages.append({"role": "user", "content": user_input})
                 messages.append(
@@ -861,10 +873,12 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     for h in history:
                         elapsed = h.get("elapsed")
                         if elapsed is None:
-                            f.write(f"User: {h['user']}\nAI: {h['ai']}\n\n")
+                            f.write(
+                                f"User: {h['user']}\nAI:\n\n{h['ai']}\n\n"
+                            )
                         else:
                             f.write(
-                                f"User: {h['user']}\nAI ({elapsed}s): {h['ai']}\n\n"
+                                f"User: {h['user']}\nAI: Thinking... ({elapsed}s)\n\n{h['ai']}\n\n"
                             )
                 print(f"Saved to {fn}")
 
