@@ -388,6 +388,15 @@ def ping_time(ip, port):
         return None
 
 
+def check_ollama_api(ip, port):
+    """Verify the Ollama API responds on the host and port."""
+    try:
+        r = requests.get(f"http://{ip}:{port}/api/tags", timeout=2)
+        return r.status_code == 200
+    except requests.RequestException:
+        return False
+
+
 def update_pings():
     try:
         df = pd.read_csv(CSV_PATH, keep_default_na=False)
@@ -408,9 +417,10 @@ def update_pings():
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = "ping timeout"
         else:
+            api_ok = check_ollama_api(row["ip"], row["port"])
             df.at[idx, "ping"] = latency
-            df.at[idx, "is_active"] = True
-            df.at[idx, "inactive_reason"] = ""
+            df.at[idx, "is_active"] = api_ok
+            df.at[idx, "inactive_reason"] = "" if api_ok else "api unreachable"
         df.at[idx, "last_check_date"] = now
     df.to_csv(CSV_PATH, index=False)
 
