@@ -27,6 +27,7 @@ def rain(
     box_right=None,
     boxes=None,
     clear_screen=True,
+    use_alt_screen=False,
 ):
     if boxes is None:
         boxes = []
@@ -46,9 +47,12 @@ def rain(
     old_settings = None
     stdin_is_tty = sys.stdin.isatty()
     try:
-        print("\033[?25l", end="")
-        if clear_screen:
-            os.system("cls" if os.name == "nt" else "clear")
+        if use_alt_screen:
+            print("\033[?1049h\033[?25l", end="")
+        else:
+            print("\033[?25l", end="")
+            if clear_screen:
+                os.system("cls" if os.name == "nt" else "clear")
         end_time = time.time() + duration if not persistent else None
         columns, rows = shutil.get_terminal_size(fallback=(80, 24))
         trail_length = 6
@@ -109,7 +113,9 @@ def rain(
         if os.name != "nt" and old_settings is not None and fd is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         time.sleep(0.5)
-        if clear_screen:
+        if use_alt_screen:
+            print("\033[?25h\033[?1049l", end="")
+        elif clear_screen:
             print("\033[0m\033[2J\033[H\033[?25h", end="")
         else:
             print("\033[0m\033[?25h", end="")
