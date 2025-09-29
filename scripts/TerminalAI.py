@@ -42,6 +42,61 @@ AI_COLOR = "\033[32m"
 
 VERBOSE = "--verbose" in sys.argv
 
+MODE_ALIASES = {
+    "chat": 0,
+    "llm": 0,
+    "image": 1,
+    "img": 1,
+    "invoke": 1,
+    "invokeai": 1,
+}
+MODE_LABELS = {0: "Chat with LLM", 1: "Generate Image (InvokeAI)"}
+MODE_OVERRIDE = None
+MODE_OVERRIDE_ERROR = None
+
+
+def _parse_mode_override():
+    """Consume --mode arguments from sys.argv and configure overrides."""
+
+    global MODE_OVERRIDE, MODE_OVERRIDE_ERROR
+    args = sys.argv[1:]
+    cleaned = [sys.argv[0]]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        value = None
+        if arg == "--mode":
+            if i + 1 < len(args):
+                value = args[i + 1]
+                i += 2
+            else:
+                MODE_OVERRIDE_ERROR = "--mode flag requires a value"
+                i += 1
+                continue
+        elif arg.startswith("--mode="):
+            value = arg.split("=", 1)[1]
+            i += 1
+        else:
+            cleaned.append(arg)
+            i += 1
+            continue
+
+        key = (value or "").strip().lower()
+        if not key:
+            MODE_OVERRIDE_ERROR = "--mode flag requires a value"
+            MODE_OVERRIDE = None
+        elif key in MODE_ALIASES:
+            MODE_OVERRIDE = MODE_ALIASES[key]
+            MODE_OVERRIDE_ERROR = None
+        else:
+            MODE_OVERRIDE_ERROR = f"Unknown mode '{value}'"
+            MODE_OVERRIDE = None
+
+    sys.argv[:] = cleaned
+
+
+_parse_mode_override()
+
 def clear_screen(force=False):
     if not VERBOSE or force:
         os.system("cls" if os.name == "nt" else "clear")
@@ -1396,11 +1451,27 @@ if __name__ == "__main__":
     else:
         update_pings()
 
+    if MODE_OVERRIDE_ERROR:
+        print(f"{RED}{MODE_OVERRIDE_ERROR}{RESET}")
+    elif MODE_OVERRIDE is not None and VERBOSE:
+        label = MODE_LABELS.get(MODE_OVERRIDE)
+        if label:
+            print(f"{CYAN}Mode override: {label}{RESET}")
+
+    forced_mode = MODE_OVERRIDE
+    use_cli_mode = forced_mode is not None
+
     while True:
-        mode = choose_mode()
+        if forced_mode is not None:
+            mode = forced_mode
+            forced_mode = None
+        else:
+            mode = choose_mode()
         if mode == 0:
             run_chat_mode()
         elif mode == 1:
             run_image_mode()
         else:
+            break
+        if use_cli_mode:
             break

@@ -50,25 +50,68 @@ class InvokeAIClient:
     def list_models(self) -> List[InvokeAIModel]:
         """Return the available main models on the server."""
 
-        url = f"{self.base_url}/api/v2/models"
-        params = {"model_type": "main"}
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        payload = resp.json()
-        items = payload.get("models") if isinstance(payload, dict) else payload
+        candidates = [
+            ("/api/v2/models", {"model_type": "main"}),
+            ("/api/v1/models", {"model_type": "main"}),
+            ("/api/v1/models", {"type": "main"}),
+            ("/api/v1/models/main", None),
+        ]
+        last_http_error: Optional[requests.HTTPError] = None
+
+        for path, params in candidates:
+            url = f"{self.base_url}{path}"
+            try:
+                resp = requests.get(url, params=params, timeout=10)
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status == 404:
+                    last_http_error = exc
+                    continue
+                raise
+
+            models = self._parse_models_payload(resp.json())
+            if models is None:
+                continue
+            models.sort(key=lambda m: m.name.lower())
+            return models
+
+        if last_http_error is not None:
+            raise InvokeAIClientError(
+                "InvokeAI server did not expose a compatible models endpoint"
+            ) from last_http_error
+
+        raise InvokeAIClientError("InvokeAI server did not return a valid models list")
+
+    def _parse_models_payload(self, payload: Any) -> Optional[List[InvokeAIModel]]:
+        """Extract model metadata from an InvokeAI response payload."""
+
+        items: Optional[List[Dict[str, Any]]] = None
+        if isinstance(payload, list):
+            items = [item for item in payload if isinstance(item, dict)]
+        elif isinstance(payload, dict):
+            for key in ("models", "items", "data"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    items = [item for item in candidate if isinstance(item, dict)]
+                    break
+            if items is None and "results" in payload and isinstance(payload["results"], list):
+                items = [item for item in payload["results"] if isinstance(item, dict)]
+
+        if items is None:
+            return None
+
         models: List[InvokeAIModel] = []
-        if isinstance(items, list):
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") not in (None, "main"):
-                    continue
-                name = item.get("name") or item.get("id") or item.get("key")
-                if not name:
-                    continue
-                base = (item.get("base") or item.get("base_model") or "").lower()
-                models.append(InvokeAIModel(name=name, base=base, key=item.get("key"), raw=item))
-        models.sort(key=lambda m: m.name.lower())
+        for item in items:
+            model_type = item.get("type") or item.get("model_type")
+            if model_type not in (None, "main", "Main"):
+                continue
+            name = item.get("name") or item.get("id") or item.get("key")
+            if not name:
+                continue
+            base = (item.get("base") or item.get("base_model") or "").lower()
+            models.append(InvokeAIModel(name=name, base=base, key=item.get("key"), raw=item))
+
         return models
 
     def generate_image(
