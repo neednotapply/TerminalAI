@@ -35,11 +35,20 @@ class InvokeAIModel:
 class InvokeAIClient:
     """Minimal client for interacting with InvokeAI's invocation API."""
 
-    def __init__(self, ip: str, port: int, nickname: Optional[str] = None, data_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        ip: str,
+        port: int,
+        nickname: Optional[str] = None,
+        data_dir: Optional[Path] = None,
+        scheme: str = "http",
+        allow_https_fallback: bool = True,
+    ) -> None:
         self.ip = ip
         self.port = port
         self.nickname = nickname or ip
-        self.base_url = f"http://{ip}:{port}"
+        self._base_urls = self._build_base_urls(scheme, allow_https_fallback)
+        self.base_url = self._base_urls[0]
         base_data = data_dir if data_dir is not None else Path(__file__).resolve().parent.parent / "data"
         self.images_dir = Path(base_data) / "images"
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -50,23 +59,43 @@ class InvokeAIClient:
     def check_health(self) -> Dict[str, Any]:
         """Ensure the InvokeAI invocation API is reachable."""
 
-        version_url = f"{self.base_url}/api/v1/app/version"
-        queue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/size"
+        last_error: Optional[requests.RequestException] = None
+        last_stage: Optional[str] = None
+        version_payload: Any = None
+        queue_payload: Any = None
 
-        try:
-            version_resp = requests.get(version_url, timeout=5)
-            version_resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise InvokeAIClientError("Failed to query InvokeAI version endpoint") from exc
+        for base_url in list(self._base_urls):
+            version_url = f"{base_url}/api/v1/app/version"
+            queue_url = f"{base_url}/api/v1/queue/{QUEUE_ID}/size"
 
-        try:
-            queue_resp = requests.get(queue_url, timeout=5)
-            queue_resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise InvokeAIClientError("Failed to query InvokeAI queue endpoint") from exc
+            try:
+                version_resp = requests.get(version_url, timeout=5)
+                version_resp.raise_for_status()
+            except requests.RequestException as exc:
+                last_error = exc
+                last_stage = "version"
+                continue
 
-        version_payload = self._safe_json(version_resp)
-        queue_payload = self._safe_json(queue_resp)
+            try:
+                queue_resp = requests.get(queue_url, timeout=5)
+                queue_resp.raise_for_status()
+            except requests.RequestException as exc:
+                last_error = exc
+                last_stage = "queue"
+                continue
+
+            version_payload = self._safe_json(version_resp)
+            queue_payload = self._safe_json(queue_resp)
+
+            # Promote the successful base URL to the front of the list so future
+            # requests prefer the working scheme.
+            self._promote_base_url(base_url)
+            break
+        else:
+            message = "Failed to query InvokeAI version endpoint"
+            if last_stage == "queue":
+                message = "Failed to query InvokeAI queue endpoint"
+            raise InvokeAIClientError(message) from last_error
 
         info: Dict[str, Any] = {
             "version": None,
@@ -128,6 +157,27 @@ class InvokeAIClient:
             return response.json()
         except ValueError:
             return None
+
+    def _build_base_urls(self, scheme: str, allow_https_fallback: bool) -> List[str]:
+        normalized = (scheme or "http").lower().rstrip(":/")
+        if normalized not in {"http", "https"}:
+            raise ValueError("scheme must be 'http' or 'https'")
+
+        base_urls = [f"{normalized}://{self.ip}:{self.port}"]
+        if allow_https_fallback:
+            alternate = "https" if normalized == "http" else "http"
+            alt_url = f"{alternate}://{self.ip}:{self.port}"
+            if alt_url not in base_urls:
+                base_urls.append(alt_url)
+        return base_urls
+
+    def _promote_base_url(self, base_url: str) -> None:
+        try:
+            self._base_urls.remove(base_url)
+        except ValueError:
+            pass
+        self._base_urls.insert(0, base_url)
+        self.base_url = base_url
 
     def _parse_models_payload(self, payload: Any) -> Optional[List[InvokeAIModel]]:
         """Extract model metadata from an InvokeAI response payload."""
