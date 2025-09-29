@@ -47,6 +47,46 @@ class InvokeAIClient:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def check_health(self) -> Dict[str, Any]:
+        """Ensure the InvokeAI invocation API is reachable."""
+
+        version_url = f"{self.base_url}/api/v1/app/version"
+        queue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/size"
+
+        try:
+            version_resp = requests.get(version_url, timeout=5)
+            version_resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise InvokeAIClientError("Failed to query InvokeAI version endpoint") from exc
+
+        try:
+            queue_resp = requests.get(queue_url, timeout=5)
+            queue_resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise InvokeAIClientError("Failed to query InvokeAI queue endpoint") from exc
+
+        version_payload = self._safe_json(version_resp)
+        queue_payload = self._safe_json(queue_resp)
+
+        info: Dict[str, Any] = {
+            "version": None,
+            "queue_size": None,
+        }
+        if isinstance(version_payload, dict):
+            if "version" in version_payload:
+                info["version"] = version_payload.get("version")
+            elif "app_version" in version_payload:
+                info["version"] = version_payload.get("app_version")
+        if isinstance(queue_payload, dict):
+            queue_data = queue_payload.get("queue") if isinstance(queue_payload.get("queue"), dict) else queue_payload
+            if isinstance(queue_data, dict):
+                if "size" in queue_data:
+                    info["queue_size"] = queue_data.get("size")
+                elif "queue_size" in queue_data:
+                    info["queue_size"] = queue_data.get("queue_size")
+
+        return info
+
     def list_models(self) -> List[InvokeAIModel]:
         """Return the available main models on the server."""
 
@@ -82,6 +122,12 @@ class InvokeAIClient:
             ) from last_http_error
 
         raise InvokeAIClientError("InvokeAI server did not return a valid models list")
+
+    def _safe_json(self, response: requests.Response) -> Any:
+        try:
+            return response.json()
+        except ValueError:
+            return None
 
     def _parse_models_payload(self, payload: Any) -> Optional[List[InvokeAIModel]]:
         """Extract model metadata from an InvokeAI response payload."""
