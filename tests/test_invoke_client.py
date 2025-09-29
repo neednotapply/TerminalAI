@@ -52,11 +52,26 @@ class InvokeClientHealthTests(unittest.TestCase):
             version_response = DummyResponse({"version": "3.5.1"})
             queue_response = DummyResponse(status_code=503)
 
-            with patch("requests.get", side_effect=[version_response, queue_response]):
+            with patch(
+                "requests.get",
+                side_effect=[
+                    version_response,
+                    queue_response,
+                    version_response,
+                    queue_response,
+                ],
+            ) as mock_get:
                 with self.assertRaises(InvokeAIClientError) as ctx:
                     client.check_health()
 
         self.assertIn("queue", str(ctx.exception).lower())
+        expected_calls = [
+            call(f"http://{TEST_SERVER_IP}:9090/api/v1/app/version", timeout=5),
+            call(f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/size", timeout=5),
+            call(f"https://{TEST_SERVER_IP}:9090/api/v1/app/version", timeout=5),
+            call(f"https://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/size", timeout=5),
+        ]
+        self.assertEqual(mock_get.call_args_list, expected_calls)
 
 
 if __name__ == "__main__":

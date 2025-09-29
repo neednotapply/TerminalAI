@@ -155,6 +155,132 @@ COLUMN_ORDER = {
 CONV_DIR = DATA_DIR / "conversations"
 LOG_DIR = DATA_DIR / "logs"
 
+MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {}
+EMBED_MODEL_KEYWORDS = ("embed", "embedding")
+
+
+def _has_embedding_keyword(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower()
+    return any(keyword in lowered for keyword in EMBED_MODEL_KEYWORDS)
+
+
+def update_model_capabilities_from_metadata(name: str, metadata: Dict[str, Any]) -> None:
+    info = MODEL_CAPABILITIES.setdefault(name, {})
+    if info.get("is_embedding"):
+        return
+
+    detected = False
+    if _has_embedding_keyword(name):
+        detected = True
+
+    details = metadata.get("details")
+    if not detected and isinstance(details, dict):
+        for key in ("model_type", "type", "family"):
+            if _has_embedding_keyword(details.get(key)):
+                detected = True
+                break
+        if not detected:
+            families = details.get("families")
+            if isinstance(families, list):
+                for family in families:
+                    if _has_embedding_keyword(family):
+                        detected = True
+                        break
+
+    if not detected:
+        model_info = metadata.get("model_info")
+        if isinstance(model_info, dict):
+            general = model_info.get("general")
+            if isinstance(general, dict):
+                for key in ("type", "category", "architecture"):
+                    if _has_embedding_keyword(general.get(key)):
+                        detected = True
+                        break
+
+    if detected:
+        info["is_embedding"] = True
+        info["confirmed"] = True
+        info.pop("inferred", None)
+
+
+def mark_model_as_embedding(name: str) -> None:
+    info = MODEL_CAPABILITIES.setdefault(name, {})
+    info["is_embedding"] = True
+    info["confirmed"] = True
+    info.pop("inferred", None)
+
+
+def is_embedding_model(name: str) -> bool:
+    info = MODEL_CAPABILITIES.get(name)
+    if info and info.get("is_embedding"):
+        return True
+    if _has_embedding_keyword(name):
+        info = MODEL_CAPABILITIES.setdefault(name, {})
+        info["is_embedding"] = True
+        info.setdefault("inferred", True)
+        return True
+    return False
+
+
+def extract_error_message(response: Optional[requests.Response]) -> str:
+    if response is None:
+        return ""
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            for key in ("error", "message", "detail"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    except ValueError:
+        pass
+
+    text = getattr(response, "text", "") or ""
+    text = text.strip()
+    if len(text) > 200:
+        text = text[:200] + "..."
+    return text
+
+
+def describe_http_error(error: requests.HTTPError) -> str:
+    message = str(error)
+    detail = extract_error_message(error.response)
+    if detail:
+        return f"{message} - {detail}"
+    return message
+
+
+def extract_embedding_vector(payload: Any) -> Optional[List[float]]:
+    if isinstance(payload, dict):
+        vector = payload.get("embedding")
+        if isinstance(vector, list):
+            return vector
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                inner = first.get("embedding")
+                if isinstance(inner, list):
+                    return inner
+    return None
+
+
+def format_embedding_response(vector: List[float]) -> str:
+    if not vector:
+        return "No embedding values returned by the server."
+    dims = len(vector)
+    preview_count = min(8, dims)
+    preview = ", ".join(f"{value:.6f}" for value in vector[:preview_count])
+    if dims > preview_count:
+        preview += ", ..."
+    return (
+        "**Embedding generated**\n"
+        f"- Dimensions: {dims}\n"
+        f"- Preview: [{preview}]"
+    )
+
 def api_headers():
     return {"Content-Type": "application/json"}
 
@@ -761,7 +887,8 @@ def select_model(models):
         print(f"{CYAN}Available Models:{RESET}")
         for i, model in enumerate(models, 1):
             mark = " *" if has_conversations(model) else ""
-            print(f"{GREEN}{i}. {model}{mark}{RESET}")
+            embed_label = " [embed]" if is_embedding_model(model) else ""
+            print(f"{GREEN}{i}. {model}{embed_label}{mark}{RESET}")
         print(f"{GREEN}0. [Back]{RESET}")
         while True:
             c = get_input(f"{CYAN}Select model: {RESET}")
@@ -774,7 +901,8 @@ def select_model(models):
         options = []
         for model in models:
             mark = " *" if has_conversations(model) else ""
-            options.append(f"{model}{mark}")
+            embed_label = " [embed]" if is_embedding_model(model) else ""
+            options.append(f"{model}{embed_label}{mark}")
         while True:
             choice = interactive_menu("Available Models:", options)
             if choice is None:
@@ -819,10 +947,63 @@ def fetch_models():
             elif isinstance(m, str):
                 models.append(m)
         models = [m for m in models if m]
+        try:
+            tags_resp = requests.get(f"{SERVER_URL}/api/tags", timeout=5)
+            tags_resp.raise_for_status()
+            tags_payload = tags_resp.json()
+            tag_models = tags_payload.get("models")
+            if isinstance(tag_models, list):
+                for entry in tag_models:
+                    if isinstance(entry, dict):
+                        name = entry.get("name") or entry.get("model") or entry.get("id")
+                        if name:
+                            update_model_capabilities_from_metadata(name, entry)
+        except (requests.RequestException, ValueError):
+            pass
         return models
     except Exception as e:
         print(f"{RED}Failed to fetch models: {e}{RESET}")
         return []
+
+
+
+def try_embeddings_request(model, prompt_text, headers, timeout_val):
+    payload = {"model": model, "prompt": prompt_text, "input": prompt_text}
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/api/embeddings",
+            headers=headers,
+            json=payload,
+            timeout=(timeout_val, timeout_val),
+        )
+        response.raise_for_status()
+    except requests.exceptions.Timeout:
+        print(f"\n{RED}/api/embeddings request timed out after {timeout_val}s{RESET}")
+        return None, True, True
+    except requests.exceptions.HTTPError as error:
+        message = describe_http_error(error)
+        print(f"\n{RED}Failed /api/embeddings: {message}{RESET}")
+        status = error.response.status_code if error.response is not None else None
+        failure = bool(status and status >= 500)
+        return None, failure, False
+    except requests.exceptions.RequestException as error:
+        print(f"\n{RED}Failed /api/embeddings: {error}{RESET}")
+        return None, True, False
+
+    try:
+        data = response.json()
+    except ValueError:
+        print(f"\n{RED}Failed /api/embeddings: invalid JSON response{RESET}")
+        return None, False, False
+
+    vector = extract_embedding_vector(data)
+    if vector is None:
+        print(f"\n{RED}/api/embeddings response did not include embedding values{RESET}")
+        return None, False, False
+
+    mark_model_as_embedding(model)
+    return format_embedding_response(vector), False, False
+
 
 def build_url(server, api):
     return f"http://{server['ip']}:{server['apis'][api]}"
@@ -1055,14 +1236,12 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                     print(f"{YELLOW}Nickname saved{RESET}")
                 redraw_ui(model)
                 continue
-            if conv_file is None:
-                conv_file = create_conversation_file(model, user_input)
-
             start, stop_event = start_thinking_timer()
             headers = api_headers()
             resp = None
             server_failed = False
             timed_out = False
+            used_embeddings = False
             timeout_val = REQUEST_TIMEOUT * (len(messages) + 1)
 
             chat_paths = [
@@ -1072,43 +1251,52 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 "/chat",
             ]
 
-            for p in chat_paths:
-                try:
-                    payload = {
-                        "model": model,
-                        "messages": messages + [{"role": "user", "content": user_input}],
-                        "stream": False,
-                    }
-                    r = requests.post(
-                        f"{SERVER_URL}{p}",
-                        headers=headers,
-                        json=payload,
-                        timeout=(timeout_val, timeout_val),
-                    )
-                    r.raise_for_status()
-                    data = r.json()
-                    msg = (
-                        data.get("choices", [{}])[0].get("message", {}).get("content")
-                        or data.get("choices", [{}])[0].get("text")
-                        or data.get("completion")
-                    )
-                    if msg:
-                        resp = msg
-                        break
-                except requests.exceptions.Timeout:
-                    print(f"\n{RED}{p} request timed out after {timeout_val}s{RESET}")
-                    server_failed = True
-                    timed_out = True
-                    break
-                except requests.exceptions.HTTPError as e:
-                    print(f"\n{RED}Failed {p}: {e}{RESET}")
-                    continue
-                except requests.exceptions.RequestException as e:
-                    print(f"\n{RED}Failed {p}: {e}{RESET}")
-                    server_failed = True
-                    break
+            embedding_candidate = is_embedding_model(model)
+            embedding_info = MODEL_CAPABILITIES.get(model, {})
+            embedding_confirmed = bool(embedding_info.get("confirmed"))
 
-            if not resp:
+            if not embedding_confirmed:
+                for p in chat_paths:
+                    try:
+                        payload = {
+                            "model": model,
+                            "messages": messages + [{"role": "user", "content": user_input}],
+                            "stream": False,
+                        }
+                        r = requests.post(
+                            f"{SERVER_URL}{p}",
+                            headers=headers,
+                            json=payload,
+                            timeout=(timeout_val, timeout_val),
+                        )
+                        r.raise_for_status()
+                        data = r.json()
+                        msg = (
+                            data.get("choices", [{}])[0].get("message", {}).get("content")
+                            or data.get("choices", [{}])[0].get("text")
+                            or data.get("completion")
+                        )
+                        if msg:
+                            resp = msg
+                            break
+                    except requests.exceptions.Timeout:
+                        print(f"\n{RED}{p} request timed out after {timeout_val}s{RESET}")
+                        server_failed = True
+                        timed_out = True
+                        break
+                    except requests.exceptions.HTTPError as e:
+                        message = describe_http_error(e)
+                        print(f"\n{RED}Failed {p}: {message}{RESET}")
+                        status = e.response.status_code if e.response is not None else None
+                        if status in (400, 404):
+                            embedding_candidate = True
+                        continue
+                    except requests.exceptions.RequestException as e:
+                        print(f"\n{RED}Failed {p}: {e}{RESET}")
+                        server_failed = True
+                        break
+
+            if not resp and not embedding_confirmed:
                 gen = [
                     "/v1/completions",
                     "/v1/complete",
@@ -1150,7 +1338,11 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         timed_out = True
                         break
                     except requests.exceptions.HTTPError as e:
-                        print(f"\n{RED}Failed {p}: {e}{RESET}")
+                        message = describe_http_error(e)
+                        print(f"\n{RED}Failed {p}: {message}{RESET}")
+                        status = e.response.status_code if e.response is not None else None
+                        if status in (400, 404):
+                            embedding_candidate = True
                         continue
                     except requests.exceptions.RequestException as e:
                         print(f"\n{RED}Failed {p}: {e}{RESET}")
@@ -1158,8 +1350,21 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         break
 
             if not resp:
-                print(f"{RED}[Error] No response{RESET}")
-                server_failed = True
+                if embedding_candidate:
+                    embed_resp, embed_failed, embed_timeout = try_embeddings_request(
+                        model, user_input, headers, timeout_val
+                    )
+                    if embed_resp:
+                        resp = embed_resp
+                        used_embeddings = True
+                        server_failed = False
+                    server_failed = server_failed or embed_failed
+                    timed_out = timed_out or embed_timeout
+
+                if not resp:
+                    print(f"{RED}[Error] No response{RESET}")
+                    if not server_failed:
+                        server_failed = True
 
             elapsed = stop_thinking_timer(start, stop_event, timed_out)
 
@@ -1186,12 +1391,17 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 # history and live conversation share the same
                 # formatting: a thinking line followed by the reply.
                 render_markdown(resp)
-                messages.append({"role": "user", "content": user_input})
-                messages.append(
-                    {"role": "assistant", "content": resp, "elapsed": elapsed}
-                )
-                history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
-                save_conversation(model, conv_file, messages, context)
+                if used_embeddings:
+                    history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
+                else:
+                    if conv_file is None:
+                        conv_file = create_conversation_file(model, user_input)
+                    messages.append({"role": "user", "content": user_input})
+                    messages.append(
+                        {"role": "assistant", "content": resp, "elapsed": elapsed}
+                    )
+                    history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
+                    save_conversation(model, conv_file, messages, context)
 
     except KeyboardInterrupt:
         print(f"{YELLOW}Session interrupted{RESET}")
