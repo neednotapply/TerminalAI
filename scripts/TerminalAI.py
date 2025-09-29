@@ -10,8 +10,18 @@ import json
 import re
 import threading
 import socket
+import subprocess
 from pathlib import Path
 from rain import rain
+from invoke_client import (
+    DEFAULT_CFG_SCALE,
+    DEFAULT_HEIGHT,
+    DEFAULT_SCHEDULER,
+    DEFAULT_STEPS,
+    DEFAULT_WIDTH,
+    InvokeAIClient,
+    InvokeAIClientError,
+)
 
 if os.name == "nt":
     import msvcrt
@@ -52,12 +62,115 @@ IDLE_TIMEOUT = 30
 REQUEST_TIMEOUT = 60
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-CSV_PATH = DATA_DIR / "endpoints.csv"
+LEGACY_CSV_PATH = DATA_DIR / "endpoints.csv"
+OLLAMA_CSV_PATH = DATA_DIR / "ollama.endpoints.csv"
+INVOKE_CSV_PATH = DATA_DIR / "invoke.endpoints.csv"
+CSV_PATHS = {
+    "ollama": OLLAMA_CSV_PATH,
+    "invokeai": INVOKE_CSV_PATH,
+}
+BASE_COLUMNS = [
+    "id",
+    "ip",
+    "port",
+    "scan_date",
+    "verified",
+    "verification_date",
+    "is_active",
+    "inactive_reason",
+    "last_check_date",
+    "api_type",
+    "hostnames",
+    "org",
+    "isp",
+    "city",
+    "region",
+    "country",
+    "latitude",
+    "longitude",
+    "ping",
+]
+COLUMN_ORDER = {
+    "ollama": BASE_COLUMNS,
+    "invokeai": BASE_COLUMNS + ["available_models"],
+}
 CONV_DIR = DATA_DIR / "conversations"
 LOG_DIR = DATA_DIR / "logs"
 
 def api_headers():
     return {"Content-Type": "application/json"}
+
+
+def normalise_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "t"}
+
+
+def read_endpoints(api_type):
+    candidates = []
+    primary = CSV_PATHS.get(api_type)
+    if primary:
+        candidates.append(primary)
+    if api_type == "ollama":
+        candidates.append(LEGACY_CSV_PATH)
+
+    for path in candidates:
+        if not path or not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path, keep_default_na=False)
+        except Exception as exc:
+            print(f"{RED}Failed to read {path.name}: {exc}{RESET}")
+            continue
+        df = df.copy()
+        if "api_type" in df.columns:
+            df["api_type"] = df["api_type"].astype(str).str.lower()
+            df = df[df["api_type"] == api_type]
+        else:
+            df["api_type"] = api_type
+        if "port" in df.columns:
+            df["port"] = pd.to_numeric(df["port"], errors="coerce")
+            df = df.dropna(subset=["port"])
+            df["port"] = df["port"].astype(int)
+        if "ping" in df.columns:
+            df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
+        return df
+
+    columns = COLUMN_ORDER.get(api_type, BASE_COLUMNS)
+    return pd.DataFrame(columns=columns)
+
+
+def write_endpoints(api_type, df):
+    path = CSV_PATHS.get(api_type)
+    if not path:
+        return
+    out = df.copy()
+    out["api_type"] = api_type
+    if "port" in out.columns:
+        out["port"] = pd.to_numeric(out["port"], errors="coerce").astype("Int64")
+    if "ping" in out.columns:
+        out["ping"] = pd.to_numeric(out["ping"], errors="coerce")
+    columns = COLUMN_ORDER.get(api_type)
+    if columns:
+        for col in columns:
+            if col not in out.columns:
+                out[col] = ""
+        ordered = columns + [c for c in out.columns if c not in columns]
+        out = out[ordered]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
+
+
+def endpoint_mask(df, ip, port):
+    if "ip" not in df.columns or "port" not in df.columns:
+        return pd.Series(False, index=df.index)
+    ports = pd.to_numeric(df["port"], errors="coerce").astype("Int64")
+    return (df["ip"] == ip) & (ports == int(port))
 
 
 def start_thinking_timer():
@@ -262,44 +375,150 @@ if os.name != "nt":
     interactive_menu = curses_menu
 
 
+def display_with_chafa(image_path):
+    if os.name == "nt":
+        print(f"{YELLOW}Preview not supported on Windows. Image saved to {image_path}{RESET}")
+        return
+    try:
+        result = subprocess.run(["chafa", str(image_path)], check=False)
+        if result.returncode not in (0, 1):
+            print(f"{YELLOW}chafa returned code {result.returncode}. Image saved to {image_path}{RESET}")
+    except FileNotFoundError:
+        print(
+            f"{YELLOW}chafa not installed. Install from https://hpjansson.org/chafa/ to preview images.{RESET}"
+        )
+
+
 def confirm_exit():
     choice = interactive_menu("Exit?", ["No", "Yes"])
     return choice == 1
 
 
-def load_servers():
-    try:
-        df = pd.read_csv(CSV_PATH, keep_default_na=False)
-    except Exception as e:
-        print(f"{RED}Failed to load CSV: {e}{RESET}")
-        return []
-    if "id" in df.columns and "nickname" not in df.columns:
-        df = df.rename(columns={"id": "nickname"})
-    if "nickname" not in df.columns:
-        df["nickname"] = df["ip"]
-    df["port"] = df["port"].astype(int)
-    df["is_active"] = df["is_active"].astype(bool)
-    df["api_type"] = df["api_type"].str.lower()
-    df["ping"] = pd.to_numeric(df.get("ping"), errors="coerce").fillna(float("inf"))
-    df = df[df["is_active"] & (df["api_type"] == "ollama")]
-    df = df.sort_values("ping")
+def prompt_int(prompt, default, minimum=None, maximum=None):
+    while True:
+        resp = get_input(f"{CYAN}{prompt} [{default}]: {RESET}")
+        if resp == "ESC":
+            return None
+        if not resp.strip():
+            return default
+        try:
+            value = int(resp.strip())
+        except ValueError:
+            print(f"{RED}Please enter a whole number{RESET}")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"{RED}Value must be >= {minimum}{RESET}")
+            continue
+        if maximum is not None and value > maximum:
+            print(f"{RED}Value must be <= {maximum}{RESET}")
+            continue
+        return value
+
+
+def prompt_float(prompt, default, minimum=None, maximum=None):
+    while True:
+        resp = get_input(f"{CYAN}{prompt} [{default}]: {RESET}")
+        if resp == "ESC":
+            return None
+        if not resp.strip():
+            return default
+        try:
+            value = float(resp.strip())
+        except ValueError:
+            print(f"{RED}Please enter a numeric value{RESET}")
+            continue
+        if minimum is not None and value < minimum:
+            print(f"{RED}Value must be >= {minimum}{RESET}")
+            continue
+        if maximum is not None and value > maximum:
+            print(f"{RED}Value must be <= {maximum}{RESET}")
+            continue
+        return value
+
+
+def choose_mode():
+    options = ["Chat with LLM", "Generate Image (InvokeAI)", "Exit"]
+    if VERBOSE:
+        print(f"{CYAN}Mode Selection:{RESET}")
+        for idx, opt in enumerate(options, 1):
+            print(f"{GREEN}{idx}. {opt}{RESET}")
+        while True:
+            choice = get_input(f"{CYAN}Choose an option: {RESET}")
+            if choice == "ESC":
+                return 2
+            if choice.isdigit() and 1 <= int(choice) <= len(options):
+                return int(choice) - 1
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        sel = interactive_menu("Select Mode:", options)
+        return 2 if sel is None else sel
+
+
+def load_servers(api_type=None):
+    target_types = [api_type] if api_type else list(CSV_PATHS.keys())
     servers = []
-    for ip, group in df.groupby("ip", sort=False):
-        apis = {row["api_type"]: row["port"] for _, row in group.iterrows()}
-        nickname = group.iloc[0]["nickname"]
-        country = group.iloc[0].get("country", "")
-        ping_val = group.iloc[0]["ping"]
-        servers.append({"ip": ip, "nickname": nickname, "apis": apis, "country": country, "ping": ping_val})
+    for api in target_types:
+        df = read_endpoints(api)
+        if df.empty:
+            continue
+        if "id" in df.columns and "nickname" not in df.columns:
+            df = df.rename(columns={"id": "nickname"})
+        if "nickname" not in df.columns:
+            df["nickname"] = df["ip"]
+        if "is_active" not in df.columns:
+            df["is_active"] = True
+        df["is_active"] = df["is_active"].apply(normalise_bool)
+        if "ping" not in df.columns:
+            df["ping"] = float("inf")
+        df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
+        df.loc[df["ping"].isna(), "ping"] = float("inf")
+        df = df[df["is_active"]]
+        if df.empty:
+            continue
+        df = df.sort_values("ping")
+        grouped = df.groupby("ip", sort=False)
+        for ip, group in grouped:
+            try:
+                ports = {
+                    api: int(row["port"])
+                    for _, row in group.iterrows()
+                    if not pd.isna(row.get("port"))
+                }
+            except Exception:
+                continue
+            if not ports:
+                continue
+            nickname = group.iloc[0]["nickname"]
+            country = group.iloc[0].get("country", "")
+            ping_val = group.iloc[0].get("ping", float("inf"))
+            servers.append(
+                {
+                    "ip": ip,
+                    "nickname": nickname,
+                    "apis": ports,
+                    "country": country,
+                    "ping": ping_val,
+                    "api_type": api,
+                }
+            )
     return servers
 
-def persist_nickname(server, new_nick):
+def persist_nickname(api_type, server, new_nick):
+    port = server["apis"].get(api_type)
+    if port is None:
+        return
     try:
-        df = pd.read_csv(CSV_PATH, keep_default_na=False)
+        df = read_endpoints(api_type)
+        if df.empty:
+            return
+        mask = endpoint_mask(df, server["ip"], port)
+        if not mask.any():
+            return
         if "nickname" in df.columns:
-            df.loc[df["ip"] == server["ip"], "nickname"] = new_nick
+            df.loc[mask, "nickname"] = new_nick
         if "id" in df.columns:
-            df.loc[df["ip"] == server["ip"], "id"] = new_nick
-        df.to_csv(CSV_PATH, index=False)
+            df.loc[mask, "id"] = new_nick
+        write_endpoints(api_type, df)
     except Exception as e:
         print(f"{RED}Failed to persist nickname: {e}{RESET}")
 
@@ -397,34 +616,51 @@ def check_ollama_api(ip, port):
         return False
 
 
-def update_pings():
+def check_invoke_api(ip, port):
+    """Verify an InvokeAI server responds at the provided host and port."""
+    url = f"http://{ip}:{port}/api/v1/app/version"
     try:
-        df = pd.read_csv(CSV_PATH, keep_default_na=False)
-    except Exception:
-        return
-    if "ping" not in df.columns:
-        df["ping"] = ""
-    if "is_active" not in df.columns:
-        df["is_active"] = True
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    for idx, row in df.iterrows():
-        active_val = str(row.get("is_active", "")).strip().lower()
-        if active_val not in ("true", "1", "yes", "t"):
-            continue
-        latency = ping_time(row["ip"], row["port"])
-        if latency is None:
-            df.at[idx, "ping"] = ""
-            df.at[idx, "is_active"] = False
-            df.at[idx, "inactive_reason"] = "ping timeout"
-        else:
-            api_ok = check_ollama_api(row["ip"], row["port"])
-            df.at[idx, "ping"] = latency
-            df.at[idx, "is_active"] = api_ok
-            df.at[idx, "inactive_reason"] = "" if api_ok else "api unreachable"
-        df.at[idx, "last_check_date"] = now
-    df.to_csv(CSV_PATH, index=False)
+        r = requests.get(url, timeout=3)
+        r.raise_for_status()
+        return True
+    except requests.RequestException:
+        return False
 
-def select_server(servers):
+
+def update_pings(target_api=None):
+    apis = [target_api] if target_api else list(CSV_PATHS.keys())
+    for api in apis:
+        df = read_endpoints(api)
+        if df.empty:
+            continue
+        if "ping" not in df.columns:
+            df["ping"] = pd.NA
+        if "is_active" not in df.columns:
+            df["is_active"] = True
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        for idx, row in df.iterrows():
+            if not normalise_bool(row.get("is_active", True)):
+                continue
+            latency = ping_time(row["ip"], row["port"])
+            if latency is None:
+                df.at[idx, "ping"] = pd.NA
+                df.at[idx, "is_active"] = False
+                if "inactive_reason" in df.columns:
+                    df.at[idx, "inactive_reason"] = "ping timeout"
+            else:
+                if api == "invokeai":
+                    api_ok = check_invoke_api(row["ip"], row["port"])
+                else:
+                    api_ok = check_ollama_api(row["ip"], row["port"])
+                df.at[idx, "ping"] = latency
+                df.at[idx, "is_active"] = api_ok
+                if "inactive_reason" in df.columns:
+                    df.at[idx, "inactive_reason"] = "" if api_ok else "api unreachable"
+            if "last_check_date" in df.columns:
+                df.at[idx, "last_check_date"] = now
+        write_endpoints(api, df)
+
+def select_server(servers, allow_back=False):
     if VERBOSE:
         print(f"{CYAN}Available Servers:{RESET}")
         for i, s in enumerate(servers, 1):
@@ -434,6 +670,8 @@ def select_server(servers):
         while True:
             c = get_input(f"{CYAN}Select server: {RESET}")
             if c == "ESC":
+                if allow_back:
+                    return None
                 confirm = get_input(f"{CYAN}Exit? y/n: {RESET}")
                 if confirm.lower() == "y":
                     sys.exit(0)
@@ -451,6 +689,8 @@ def select_server(servers):
         while True:
             choice = interactive_menu("Available Servers:", options)
             if choice is None:
+                if allow_back:
+                    return None
                 if confirm_exit():
                     sys.exit(0)
                 else:
@@ -481,6 +721,32 @@ def select_model(models):
             if choice is None:
                 return None
             return models[choice]
+
+
+def select_invoke_model(models):
+    labels = [
+        f"{m.name} [{m.base or 'unknown'}]" if isinstance(m.base, str) else m.name
+        for m in models
+    ]
+    if VERBOSE:
+        print(f"{CYAN}Available InvokeAI Models:{RESET}")
+        for idx, label in enumerate(labels, 1):
+            print(f"{GREEN}{idx}. {label}{RESET}")
+        print(f"{GREEN}0. [Back]{RESET}")
+        while True:
+            choice = get_input(f"{CYAN}Select model: {RESET}")
+            if choice in ("ESC", "0") or choice.lower() == "back":
+                return None
+            if choice.isdigit() and 1 <= int(choice) <= len(models):
+                return models[int(choice) - 1]
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        while True:
+            choice = interactive_menu("InvokeAI Models:", labels)
+            if choice is None:
+                return None
+            return models[choice]
+
 
 def fetch_models():
     try:
@@ -726,7 +992,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 new = input(f"{CYAN}New nickname: {RESET}").strip()
                 if new:
                     selected_server["nickname"] = new
-                    persist_nickname(selected_server, new)
+                    persist_nickname(selected_api, selected_server, new)
                     print(f"{YELLOW}Nickname saved{RESET}")
                 redraw_ui(model)
                 continue
@@ -840,9 +1106,17 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
 
             if server_failed:
                 try:
-                    df = pd.read_csv(CSV_PATH, keep_default_na=False)
-                    df.loc[(df["ip"] == selected_server["ip"]) & (df["port"] == selected_server["apis"][selected_api]), "is_active"] = False
-                    df.to_csv(CSV_PATH, index=False)
+                    df = read_endpoints(selected_api)
+                    mask = endpoint_mask(
+                        df,
+                        selected_server["ip"],
+                        selected_server["apis"][selected_api],
+                    )
+                    if mask.any():
+                        df.loc[mask, "is_active"] = False
+                        if "inactive_reason" in df.columns:
+                            df.loc[mask, "inactive_reason"] = "api unreachable"
+                        write_endpoints(selected_api, df)
                     print(f"{RED}Server marked inactive due to failure{RESET}")
                 except Exception as ex:
                     print(f"{RED}Failed to update CSV: {ex}{RESET}")
@@ -881,9 +1155,216 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                             )
                 print(f"Saved to {fn}")
 
+def run_chat_mode():
+    global SERVER_URL, selected_server, selected_api
+    selected_api = "ollama"
+    while True:
+        clear_screen()
+        servers = load_servers("ollama")
+        srv_list = [s for s in servers if selected_api in s["apis"]]
+        if not srv_list:
+            print(f"{RED}No active Ollama servers available{RESET}")
+            get_input(f"{CYAN}Press Enter to return to the main menu{RESET}")
+            return
+
+        choice = select_server(srv_list, allow_back=True)
+        if choice is None:
+            return
+        selected_server = choice
+        clear_screen()
+        SERVER_URL = build_url(selected_server, selected_api)
+
+        models = fetch_models()
+        if not models:
+            print(f"{RED}No models found on selected server{RESET}")
+            try:
+                df = read_endpoints(selected_api)
+                mask = endpoint_mask(
+                    df,
+                    selected_server["ip"],
+                    selected_server["apis"][selected_api],
+                )
+                if mask.any():
+                    df.loc[mask, "is_active"] = False
+                    if "inactive_reason" in df.columns:
+                        df.loc[mask, "inactive_reason"] = "no models"
+                    write_endpoints(selected_api, df)
+            except Exception as ex:
+                print(f"{RED}Failed to update CSV: {ex}{RESET}")
+            get_input(f"{CYAN}Press Enter to select another server{RESET}")
+            continue
+
+        while True:
+            chosen = select_model(models)
+            if chosen is None:
+                clear_screen()
+                break
+            clear_screen()
+            while True:
+                if has_conversations(chosen):
+                    conv_file, messages, history, context = select_conversation(chosen)
+                    if conv_file == "back":
+                        break
+                else:
+                    print(f"{CYAN}No previous conversations found.{RESET}")
+                    conv_file, messages, history, context = (None, [], [], None)
+
+                result = chat_loop(chosen, conv_file, messages, history, context)
+                if result == "back":
+                    clear_screen()
+                    if has_conversations(chosen):
+                        continue
+                    conv_file = "back"
+                    break
+                if result == "server_inactive":
+                    conv_file = "server_inactive"
+                    break
+                if result == "exit":
+                    sys.exit(0)
+                else:
+                    return
+            if conv_file == "back":
+                clear_screen()
+                continue
+            if conv_file == "server_inactive":
+                clear_screen()
+                break
+            break
+
+
+def run_image_mode():
+    global SERVER_URL, selected_server, selected_api
+    selected_api = "invokeai"
+    while True:
+        clear_screen()
+        servers = load_servers("invokeai")
+        if not servers:
+            print(f"{RED}No InvokeAI servers available{RESET}")
+            get_input(f"{CYAN}Press Enter to return to the main menu{RESET}")
+            return
+
+        server_choice = select_server(servers, allow_back=True)
+        if server_choice is None:
+            return
+        selected_server = server_choice
+        port = selected_server["apis"].get("invokeai")
+        if port is None:
+            print(f"{RED}Selected server does not expose InvokeAI API{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        client = InvokeAIClient(selected_server["ip"], port, selected_server["nickname"], DATA_DIR)
+        try:
+            models = client.list_models()
+        except requests.RequestException as exc:
+            print(f"{RED}Failed to retrieve models: {exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+        if not models:
+            print(f"{RED}No InvokeAI models reported by this server{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        while True:
+            model = select_invoke_model(models)
+            if model is None:
+                break
+            while True:
+                prompt = get_input(f"{CYAN}Prompt: {RESET}")
+                if prompt == "ESC":
+                    break
+                if not prompt.strip():
+                    print(f"{RED}Prompt cannot be empty{RESET}")
+                    continue
+                negative = get_input(f"{CYAN}Negative prompt (optional): {RESET}")
+                if negative == "ESC":
+                    break
+                width = prompt_int("Width (px, multiple of 8)", DEFAULT_WIDTH, minimum=64)
+                if width is None:
+                    break
+                height = prompt_int("Height (px, multiple of 8)", DEFAULT_HEIGHT, minimum=64)
+                if height is None:
+                    break
+                steps = prompt_int("Steps", DEFAULT_STEPS, minimum=1)
+                if steps is None:
+                    break
+                cfg_scale = prompt_float("CFG Scale", DEFAULT_CFG_SCALE, minimum=0.0)
+                if cfg_scale is None:
+                    break
+                scheduler = get_input(f"{CYAN}Scheduler [{DEFAULT_SCHEDULER}]: {RESET}")
+                if scheduler == "ESC":
+                    break
+                scheduler = scheduler.strip() or DEFAULT_SCHEDULER
+                seed_text = get_input(f"{CYAN}Seed (blank=random): {RESET}")
+                if seed_text == "ESC":
+                    break
+                seed_val = None
+                seed_text = seed_text.strip()
+                if seed_text:
+                    try:
+                        seed_val = int(seed_text)
+                    except ValueError:
+                        print(f"{RED}Seed must be an integer{RESET}")
+                        continue
+
+                width = max(64, (width // 8) * 8)
+                height = max(64, (height // 8) * 8)
+
+                try:
+                    result = client.generate_image(
+                        model=model,
+                        prompt=prompt.strip(),
+                        negative_prompt=(negative or "").strip(),
+                        width=width,
+                        height=height,
+                        steps=steps,
+                        cfg_scale=cfg_scale,
+                        scheduler=scheduler,
+                        seed=seed_val,
+                    )
+                except InvokeAIClientError as exc:
+                    print(f"{RED}{exc}{RESET}")
+                    get_input(f"{CYAN}Press Enter to try again{RESET}")
+                    continue
+                except requests.RequestException as exc:
+                    print(f"{RED}Network error: {exc}{RESET}")
+                    get_input(f"{CYAN}Press Enter to try again{RESET}")
+                    continue
+
+                image_path = result["path"]
+                print(f"{GREEN}Image saved to {image_path}{RESET}")
+                metadata_path = result.get("metadata_path")
+                if metadata_path:
+                    print(f"{CYAN}Metadata saved to {metadata_path}{RESET}")
+                display_with_chafa(image_path)
+
+                keep = get_input(f"{CYAN}Keep image? (y/n) [y]: {RESET}")
+                if keep == "ESC":
+                    keep = "y"
+                if keep and keep.lower().startswith("n"):
+                    try:
+                        image_path.unlink(missing_ok=True)
+                        if metadata_path:
+                            Path(metadata_path).unlink(missing_ok=True)
+                        print(f"{YELLOW}Image discarded.{RESET}")
+                    except Exception as exc:
+                        print(f"{RED}Failed to delete image: {exc}{RESET}")
+                else:
+                    print(f"{GREEN}Image retained.{RESET}")
+
+                cont = get_input(
+                    f"{CYAN}Press Enter to generate again, type 'back' to change model, or ESC for server menu: {RESET}"
+                )
+                if cont == "ESC":
+                    return
+                if cont.strip().lower() == "back":
+                    break
+            break
+
+
 # Main loop
 if __name__ == "__main__":
-    selected_api = 'ollama'
+    selected_api = "ollama"
 
     if not VERBOSE:
         clear_screen()
@@ -916,68 +1397,10 @@ if __name__ == "__main__":
         update_pings()
 
     while True:
-        clear_screen()
-        # 1. Load and pick a server
-        servers = load_servers()
-        srv_list = [s for s in servers if selected_api in s["apis"]]
-        if not srv_list:
-            print(f"{RED}No active servers available{RESET}")
-            sys.exit(1)
-
-        selected_server = select_server(srv_list)
-        clear_screen()
-        SERVER_URL = build_url(selected_server, selected_api)
-
-        # 2. Fetch models
-        models = fetch_models()
-        if not models:
-            print(f"{RED}No models found on selected server{RESET}")
-            try:
-                df = pd.read_csv(CSV_PATH, keep_default_na=False)
-                df.loc[(df["ip"] == selected_server["ip"]) & (df["port"] == selected_server["apis"][selected_api]), "is_active"] = False
-                df.to_csv(CSV_PATH, index=False)
-            except Exception as ex:
-                print(f"{RED}Failed to update CSV: {ex}{RESET}")
-            continue
-
-        # 3. Pick a model
-        while True:
-            chosen = select_model(models)
-            if chosen is None:
-                clear_screen()
-                break  # back to server selection
-            clear_screen()
-
-            # 4. Pick or start conversation
-            while True:
-                if has_conversations(chosen):
-                    conv_file, messages, history, context = select_conversation(chosen)
-                    if conv_file == 'back':
-                        break  # back to model selection
-                else:
-                    print(f"{CYAN}No previous conversations found.{RESET}")
-                    conv_file, messages, history, context = (None, [], [], None)
-
-                result = chat_loop(chosen, conv_file, messages, history, context)
-                if result == 'back':
-                    clear_screen()
-                    if has_conversations(chosen):
-                        continue  # back to conversation selection
-                    else:
-                        conv_file = 'back'
-                        break
-                elif result == 'server_inactive':
-                    conv_file = 'server_inactive'
-                    break
-                elif result == 'exit':
-                    sys.exit(0)
-                else:
-                    sys.exit(0)
-            if conv_file == 'back':
-                clear_screen()
-                continue  # select model again
-            elif conv_file == 'server_inactive':
-                clear_screen()
-                break  # back to server selection
-            else:
-                break
+        mode = choose_mode()
+        if mode == 0:
+            run_chat_mode()
+        elif mode == 1:
+            run_image_mode()
+        else:
+            break
