@@ -40,6 +40,9 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 AI_COLOR = "\033[32m"
 
+# Seconds to keep the "Hack The Planet" splash visible before continuing.
+CONNECTING_SCREEN_DURATION = 0.5
+
 VERBOSE = "--verbose" in sys.argv
 
 MODE_ALIASES = {
@@ -673,11 +676,12 @@ def check_ollama_api(ip, port):
 
 def check_invoke_api(ip, port):
     """Verify an InvokeAI server responds at the provided host and port."""
-    url = f"http://{ip}:{port}/api/v1/app/version"
+    client = InvokeAIClient(ip, int(port), data_dir=DATA_DIR)
     try:
-        r = requests.get(url, timeout=3)
-        r.raise_for_status()
+        client.check_health()
         return True
+    except InvokeAIClientError:
+        return False
     except requests.RequestException:
         return False
 
@@ -843,7 +847,7 @@ def display_connecting_box(x, y, w, h):
     mx = x + (w - len(msg)) // 2
     my = y + h // 2
     print(f"\033[{my};{mx}H{BOLD}{GREEN}{msg}{RESET}", flush=True)
-    time.sleep(1.5)
+    time.sleep(CONNECTING_SCREEN_DURATION)
 
 
 def render_markdown(text):
@@ -1311,8 +1315,42 @@ def run_image_mode():
         client = InvokeAIClient(selected_server["ip"], port, selected_server["nickname"], DATA_DIR)
         try:
             models = client.list_models()
+        except InvokeAIClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            try:
+                df = read_endpoints(selected_api)
+                mask = endpoint_mask(
+                    df,
+                    selected_server["ip"],
+                    selected_server["apis"][selected_api],
+                )
+                if mask.any():
+                    df.loc[mask, "is_active"] = False
+                    if "inactive_reason" in df.columns:
+                        df.loc[mask, "inactive_reason"] = "unsupported models endpoint"
+                    write_endpoints(selected_api, df)
+                    print(f"{YELLOW}Server marked inactive due to incompatible models API{RESET}")
+            except Exception as ex:
+                print(f"{RED}Failed to update CSV: {ex}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
         except requests.RequestException as exc:
             print(f"{RED}Failed to retrieve models: {exc}{RESET}")
+            try:
+                df = read_endpoints(selected_api)
+                mask = endpoint_mask(
+                    df,
+                    selected_server["ip"],
+                    selected_server["apis"][selected_api],
+                )
+                if mask.any():
+                    df.loc[mask, "is_active"] = False
+                    if "inactive_reason" in df.columns:
+                        df.loc[mask, "inactive_reason"] = "api unreachable"
+                    write_endpoints(selected_api, df)
+                    print(f"{YELLOW}Server marked inactive due to network failure{RESET}")
+            except Exception as ex:
+                print(f"{RED}Failed to update CSV: {ex}{RESET}")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
         if not models:
