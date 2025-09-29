@@ -13,13 +13,28 @@ import requests
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-CSV_PATH = DATA_DIR / "endpoints.csv"
+LEGACY_CSV_PATH = DATA_DIR / "endpoints.csv"
+OLLAMA_CSV_PATH = DATA_DIR / "ollama.endpoints.csv"
+INVOKE_CSV_PATH = DATA_DIR / "invoke.endpoints.csv"
+CSV_PATHS = {
+    "ollama": OLLAMA_CSV_PATH,
+    "invokeai": INVOKE_CSV_PATH,
+}
 CONFIG_PATH = DATA_DIR / "config.json"
 SHODAN_QUERIES = [
-    'http.html:"Ollama is running" port:11434'
+    {
+        "query": 'http.html:"Ollama is running" port:11434',
+        "api_type": "ollama",
+        "default_port": 11434,
+    },
+    {
+        "query": 'title:"Invoke - Community Edition"',
+        "api_type": "invokeai",
+        "default_port": 9090,
+    },
 ]
 
-COLUMNS = [
+BASE_COLUMNS = [
     "id",
     "ip",
     "port",
@@ -41,6 +56,11 @@ COLUMNS = [
     "ping",
 ]
 
+COLUMN_ORDER = {
+    "ollama": BASE_COLUMNS,
+    "invokeai": BASE_COLUMNS + ["available_models"],
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
@@ -53,6 +73,82 @@ def build_name(city, country, org):
     if org and location:
         return f"{location} ({org})"
     return location or org
+
+
+def normalise_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "t"}
+
+
+def ensure_columns(df, api_type):
+    df = df.copy()
+    if "api_type" in df.columns:
+        df["api_type"] = df["api_type"].astype(str).str.lower()
+        df = df[df["api_type"] == api_type]
+    else:
+        df["api_type"] = api_type
+
+    columns = COLUMN_ORDER.get(api_type, BASE_COLUMNS)
+    for col in columns:
+        if col not in df.columns:
+            if col == "verified":
+                df[col] = 0
+            elif col == "is_active":
+                df[col] = True
+            else:
+                df[col] = ""
+    if "available_models" in columns and "available_models" not in df.columns:
+        df["available_models"] = ""
+
+    df["verified"] = pd.to_numeric(df["verified"], errors="coerce").fillna(0).astype(int)
+    df["is_active"] = df["is_active"].apply(normalise_bool)
+    df["port"] = pd.to_numeric(df["port"], errors="coerce").astype("Int64")
+    df = df.dropna(subset=["ip", "port"])
+    df["port"] = df["port"].astype(int)
+    df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
+    return df
+
+
+def load_dataframe(api_type):
+    candidates = []
+    primary = CSV_PATHS.get(api_type)
+    if primary:
+        candidates.append(primary)
+    if api_type == "ollama":
+        candidates.append(LEGACY_CSV_PATH)
+
+    for path in candidates:
+        if not path or not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path, keep_default_na=False)
+        except Exception as exc:
+            logging.warning("Failed to read %s: %s", path, exc)
+            continue
+        return ensure_columns(df, api_type)
+
+    df = pd.DataFrame(columns=COLUMN_ORDER.get(api_type, BASE_COLUMNS))
+    df["api_type"] = api_type
+    return ensure_columns(df, api_type)
+
+
+def save_dataframe(api_type, df):
+    out = df.copy()
+    out["api_type"] = api_type
+    columns = COLUMN_ORDER.get(api_type, BASE_COLUMNS)
+    for col in columns:
+        if col not in out.columns:
+            out[col] = ""
+    ordered = columns + [c for c in out.columns if c not in columns]
+    out = out[ordered]
+    path = CSV_PATHS[api_type]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False)
 
 
 def load_api_key():
@@ -91,13 +187,58 @@ def check_ollama_api(ip, port):
     try:
         r = requests.get(url, timeout=2)
         if r.status_code == 200:
-            return True, ""
-        return False, f"http {r.status_code}"
+            try:
+                data = r.json()
+                models = [
+                    m.get("name") or m.get("model") or m.get("id")
+                    for m in data.get("models", [])
+                ]
+                models = [m for m in models if m]
+            except Exception:
+                models = []
+            return True, "", models
+        return False, f"http {r.status_code}", []
     except requests.RequestException as e:
-        return False, str(e)
+        return False, str(e), []
 
 
-def update_existing(api, df, batch_size):
+def check_invoke_api(ip, port):
+    """Check that the InvokeAI API responds and gather available models."""
+    base = f"http://{ip}:{port}"
+    version_url = f"{base}/api/v1/app/version"
+    try:
+        r = requests.get(version_url, timeout=3)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        return False, str(e), []
+
+    models_url = f"{base}/api/v2/models"
+    try:
+        params = {"model_type": "main"}
+        r = requests.get(models_url, params=params, timeout=5)
+        r.raise_for_status()
+        payload = r.json()
+        raw_models = payload.get("models") if isinstance(payload, dict) else payload
+        models = []
+        if isinstance(raw_models, list):
+            for item in raw_models:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name") or item.get("id") or item.get("key")
+                if not name:
+                    continue
+                base_model = item.get("base") or item.get("base_model")
+                if base_model:
+                    models.append(f"{name} ({base_model})")
+                else:
+                    models.append(name)
+        return True, "", models
+    except requests.RequestException as e:
+        # Server responded to health check but failed for models list.
+        return True, f"models fetch failed: {e}", []
+
+
+def update_existing(api, df, batch_size, api_type):
     if df.empty:
         return df
 
@@ -157,40 +298,57 @@ def update_existing(api, df, batch_size):
             df.at[idx, "inactive_reason"] = errors.get(key, "port closed")
             df.at[idx, "last_check_date"] = now
         latency = ping_time(ip, port)
+        df.at[idx, "ping"] = latency if latency is not None else pd.NA
         if latency is None:
-            df.at[idx, "ping"] = pd.NA
             df.at[idx, "is_active"] = False
             df.at[idx, "inactive_reason"] = "ping timeout"
+            if "available_models" in df.columns:
+                df.at[idx, "available_models"] = ""
+            continue
+
+        if api_type == "invokeai":
+            api_ok, reason, models = check_invoke_api(ip, port)
         else:
-            api_ok, reason = check_ollama_api(ip, port)
-            df.at[idx, "ping"] = latency
-            df.at[idx, "is_active"] = api_ok
-            df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
+            api_ok, reason, models = check_ollama_api(ip, port)
+        df.at[idx, "is_active"] = api_ok
+        df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
+        if "available_models" in df.columns:
+            df.at[idx, "available_models"] = ";".join(models)
     return df
 
 
-def find_new(api, df, limit):
+def find_new(api, df, query_info, limit):
+    api_type = query_info["api_type"]
+    query = query_info["query"]
+    default_port = query_info.get("default_port")
     existing = set(zip(df["ip"], df["port"]))
     new_rows = []
-    for query in SHODAN_QUERIES:
-        logging.info(f"Executing Shodan query: {query} (limit {limit})")
-        try:
-            results = api.search(query, limit=limit * 5).get("matches", [])
-        except shodan.APIError as e:
-            logging.info(f"Shodan query failed: {e}")
+
+    logging.info(f"Executing Shodan query: {query} (limit {limit})")
+    try:
+        results = api.search(query, limit=limit * 5).get("matches", [])
+    except shodan.APIError as e:
+        logging.info(f"Shodan query failed: {e}")
+        return df
+
+    for r in results:
+        ip = r.get("ip_str")
+        port = r.get("port") or default_port
+        if not ip or port is None:
             continue
-        count = 0
-        for r in results:
-            ip = r.get("ip_str")
-            port = r.get("port")
-            if (ip, str(port)) in existing:
-                continue
-            location = r.get("location", {})
-            scan_date = r.get("timestamp", utc_now())
-            org = r.get("org", "")
-            city = location.get("city", "")
-            country = location.get("country_name", "")
-            new_rows.append({
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            continue
+        if (ip, port) in existing:
+            continue
+        location = r.get("location", {})
+        scan_date = r.get("timestamp", utc_now())
+        org = r.get("org", "")
+        city = location.get("city", "")
+        country = location.get("country_name", "")
+        new_rows.append(
+            {
                 "id": build_name(city, country, org),
                 "ip": ip,
                 "port": port,
@@ -200,46 +358,60 @@ def find_new(api, df, limit):
                 "is_active": True,
                 "inactive_reason": "",
                 "last_check_date": scan_date,
-                "api_type": "ollama",
+                "api_type": api_type,
                 "hostnames": ";".join(r.get("hostnames", [])),
                 "org": org,
                 "isp": r.get("isp", ""),
                 "city": city,
-                "region": location.get("region_code") or location.get("region_name", ""),
+                "region": location.get("region_code")
+                or location.get("region_name", ""),
                 "country": country,
                 "latitude": location.get("latitude", ""),
                 "longitude": location.get("longitude", ""),
                 "ping": pd.NA,
-            })
-            existing.add((ip, str(port)))
-            count += 1
-        logging.info(f"Processed {count} results for query: {query}")
-    if new_rows:
-        new_df = pd.DataFrame(new_rows)
-        for idx, row in new_df.iterrows():
-            latency = ping_time(row["ip"], row["port"])
-            if latency is None:
-                new_df.at[idx, "ping"] = pd.NA
-                new_df.at[idx, "is_active"] = False
-                new_df.at[idx, "inactive_reason"] = "ping timeout"
-            else:
-                api_ok, reason = check_ollama_api(row["ip"], row["port"])
-                new_df.at[idx, "ping"] = latency
-                new_df.at[idx, "is_active"] = api_ok
-                new_df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
-        new_df["ping"] = pd.to_numeric(new_df["ping"], errors="coerce")
-        new_df.sort_values(by="ping", inplace=True, na_position="last")
-        new_df = new_df.head(limit)
-        if df.empty:
-            df = new_df
+            }
+        )
+        existing.add((ip, port))
+        if len(new_rows) >= limit:
+            break
+
+    if not new_rows:
+        return df
+
+    new_df = ensure_columns(pd.DataFrame(new_rows), api_type)
+    for idx, row in new_df.iterrows():
+        latency = ping_time(row["ip"], row["port"])
+        if latency is None:
+            new_df.at[idx, "ping"] = pd.NA
+            new_df.at[idx, "is_active"] = False
+            new_df.at[idx, "inactive_reason"] = "ping timeout"
+            if "available_models" in new_df.columns:
+                new_df.at[idx, "available_models"] = ""
         else:
-            df = pd.concat([df, new_df], ignore_index=True)
-    return df
+            if api_type == "invokeai":
+                api_ok, reason, models = check_invoke_api(row["ip"], row["port"])
+            else:
+                api_ok, reason, models = check_ollama_api(row["ip"], row["port"])
+            new_df.at[idx, "ping"] = latency
+            new_df.at[idx, "is_active"] = api_ok
+            new_df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
+            if "available_models" in new_df.columns:
+                new_df.at[idx, "available_models"] = ";".join(models)
+
+    new_df["ping"] = pd.to_numeric(new_df["ping"], errors="coerce")
+    new_df.sort_values(by="ping", inplace=True, na_position="last")
+
+    if df.empty:
+        return new_df
+
+    combined = pd.concat([df, new_df], ignore_index=True)
+    combined["ping"] = pd.to_numeric(combined["ping"], errors="coerce")
+    return combined
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Keep endpoints.csv up to date using the Shodan API"
+        description="Discover and verify Ollama and InvokeAI endpoints via Shodan"
     )
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging"
@@ -269,33 +441,34 @@ def main():
             "SHODAN_API_KEY not provided in config.json or environment variable"
         )
     api = shodan.Shodan(key)
-    try:
-        df = pd.read_csv(CSV_PATH, keep_default_na=False)
-    except FileNotFoundError:
-        df = pd.DataFrame(columns=COLUMNS)
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
+    queries_by_type = {}
+    for info in SHODAN_QUERIES:
+        queries_by_type.setdefault(info["api_type"], []).append(info)
 
-    logging.info("Updating existing endpoints")
-    oldest_idx = (
-        df.sort_values(by="last_check_date")
-        .head(args.existing_limit)
-        .index
-    )
-    df.loc[oldest_idx] = update_existing(
-        api, df.loc[oldest_idx].copy(), args.existing_limit
-    )
-    logging.info("Finished updating existing endpoints")
+    for api_type, query_infos in queries_by_type.items():
+        logging.info("Processing %s endpoints", api_type)
+        df = load_dataframe(api_type)
+        if not df.empty and "last_check_date" in df.columns:
+            logging.info("Updating existing %s endpoints", api_type)
+            oldest_idx = (
+                df.sort_values(by="last_check_date")
+                .head(args.existing_limit)
+                .index
+            )
+            df.loc[oldest_idx] = update_existing(
+                api, df.loc[oldest_idx].copy(), args.existing_limit, api_type
+            )
+            logging.info("Finished updating %s endpoints", api_type)
+        else:
+            logging.info("No existing %s endpoints to update", api_type)
 
-    logging.info("Searching for new endpoints")
-    df = find_new(api, df, args.limit)
-    logging.info("Finished searching for new endpoints")
+        for info in query_infos:
+            df = find_new(api, df, info, args.limit)
 
-    df = df[COLUMNS]
-    df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
-    df.to_csv(CSV_PATH, index=False)
+        columns = COLUMN_ORDER.get(api_type, BASE_COLUMNS)
+        df = df[columns]
+        df["ping"] = pd.to_numeric(df["ping"], errors="coerce")
+        save_dataframe(api_type, df)
 
 
 if __name__ == "__main__":

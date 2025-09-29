@@ -1,0 +1,2 @@
+id,ip,port,scan_date,verified,verification_date,is_active,inactive_reason,last_check_date,api_type,hostnames,org,isp,city,region,country,latitude,longitude,ping,available_models
+InvokeAI node 1,3.3.3.3,9090,2025-04-20T20:38:52.125129+00:00,1,2025-04-20T20:38:52.125129+00:00,TRUE,,2025-04-20T20:38:52.125129+00:00,invokeai,,Creative ISP,Example ISP,ExampleCity,ExampleRegion,ExampleCountry,0,0,25.0,SDXL Base (sdxl);SDXL Refiner (sdxl)
