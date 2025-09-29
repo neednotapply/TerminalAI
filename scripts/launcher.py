@@ -19,7 +19,18 @@ HEADER_LINES = [
     "   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝",
 ]
 
-OPTIONS = ["Start TerminalAI", "Scan Shodan"]
+MENU_OPTIONS = [
+    {"label": "TerminalAI (Full Menu)", "script": "TerminalAI.py", "extra_args": []},
+    {"label": "Chat with LLM", "script": "TerminalAI.py", "extra_args": ["--mode", "chat"]},
+    {
+        "label": "Generate Image (InvokeAI)",
+        "script": "TerminalAI.py",
+        "extra_args": ["--mode", "image"],
+    },
+    {"label": "Scan Shodan", "script": "shodanscan.py", "extra_args": []},
+]
+
+OPTIONS = [opt["label"] for opt in MENU_OPTIONS]
 VERBOSE = "--verbose" in sys.argv
 
 if os.name == "nt":
@@ -42,7 +53,10 @@ def run_verbose() -> int | None:
         choice = input(f"{GREEN}> {RESET}").strip()
     except EOFError:
         return None
-    return int(choice) - 1 if choice in {"1", "2"} else None
+    if not choice.isdigit():
+        return None
+    idx = int(choice) - 1
+    return idx if 0 <= idx < len(OPTIONS) else None
 
 
 def run_windows_menu() -> int | None:
@@ -210,10 +224,15 @@ def main() -> None:
     if choice is None:
         return
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    target = "TerminalAI.py" if choice == 0 else "shodanscan.py"
-    if choice == 1:
+    selected = MENU_OPTIONS[choice]
+    if selected["script"] == "shodanscan.py":
         os.system("cls" if os.name == "nt" else "clear")
-    subprocess.call([sys.executable, os.path.join(script_dir, target), *args])
+    elif choice != 0:
+        os.system("cls" if os.name == "nt" else "clear")
+    cmd = [sys.executable, os.path.join(script_dir, selected["script"])]
+    cmd.extend(selected.get("extra_args", []))
+    cmd.extend(args)
+    subprocess.call(cmd)
 
 
 if __name__ == "__main__":
