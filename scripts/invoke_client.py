@@ -60,7 +60,6 @@ class InvokeAIClient:
         """Ensure the InvokeAI invocation API is reachable."""
 
         last_error: Optional[requests.RequestException] = None
-        last_stage: Optional[str] = None
         version_payload: Any = None
         queue_payload: Any = None
 
@@ -73,29 +72,24 @@ class InvokeAIClient:
                 version_resp.raise_for_status()
             except requests.RequestException as exc:
                 last_error = exc
-                last_stage = "version"
                 continue
+
+            version_payload = self._safe_json(version_resp)
 
             try:
                 queue_resp = requests.get(queue_url, timeout=5)
                 queue_resp.raise_for_status()
-            except requests.RequestException as exc:
-                last_error = exc
-                last_stage = "queue"
-                continue
-
-            version_payload = self._safe_json(version_resp)
-            queue_payload = self._safe_json(queue_resp)
+            except requests.RequestException:
+                queue_payload = None
+            else:
+                queue_payload = self._safe_json(queue_resp)
 
             # Promote the successful base URL to the front of the list so future
             # requests prefer the working scheme.
             self._promote_base_url(base_url)
             break
         else:
-            message = "Failed to query InvokeAI version endpoint"
-            if last_stage == "queue":
-                message = "Failed to query InvokeAI queue endpoint"
-            raise InvokeAIClientError(message) from last_error
+            raise InvokeAIClientError("Failed to query InvokeAI version endpoint") from last_error
 
         info: Dict[str, Any] = {
             "version": None,

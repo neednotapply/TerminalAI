@@ -1,13 +1,27 @@
+import importlib
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
 import requests
 
+rain_stub = types.ModuleType("rain")
+rain_stub.rain = lambda *args, **kwargs: None
+sys.modules.setdefault("rain", rain_stub)
+
+curses_nav_stub = types.ModuleType("curses_nav")
+curses_nav_stub.get_input = lambda *args, **kwargs: ""
+curses_nav_stub.interactive_menu = lambda *args, **kwargs: None
+sys.modules.setdefault("curses_nav", curses_nav_stub)
+
+sys.modules.setdefault("invoke_client", importlib.import_module("scripts.invoke_client"))
+
+import scripts.TerminalAI
 from scripts.invoke_client import (
     InvokeAIClient,
-    InvokeAIClientError,
     InvokeAIModel,
     QUEUE_ID,
 )
@@ -51,7 +65,7 @@ class InvokeClientHealthTests(unittest.TestCase):
             ],
         )
 
-    def test_check_health_queue_failure(self):
+    def test_check_health_queue_failure_is_tolerated(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(tmpdir))
             version_response = DummyResponse({"version": "3.5.1"})
@@ -62,21 +76,28 @@ class InvokeClientHealthTests(unittest.TestCase):
                 side_effect=[
                     version_response,
                     queue_response,
-                    version_response,
-                    queue_response,
                 ],
             ) as mock_get:
-                with self.assertRaises(InvokeAIClientError) as ctx:
-                    client.check_health()
+                info = client.check_health()
 
-        self.assertIn("queue", str(ctx.exception).lower())
+        self.assertEqual(info["version"], "3.5.1")
+        self.assertIsNone(info["queue_size"])
         expected_calls = [
             call(f"http://{TEST_SERVER_IP}:9090/api/v1/app/version", timeout=5),
             call(f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/size", timeout=5),
-            call(f"https://{TEST_SERVER_IP}:9090/api/v1/app/version", timeout=5),
-            call(f"https://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/size", timeout=5),
         ]
         self.assertEqual(mock_get.call_args_list, expected_calls)
+
+    def test_check_invoke_api_returns_true_when_queue_unavailable(self):
+        with patch("scripts.TerminalAI.InvokeAIClient") as mock_client_cls:
+            client_instance = mock_client_cls.return_value
+            client_instance.check_health.return_value = {"version": "3.5.1", "queue_size": None}
+
+            result = scripts.TerminalAI.check_invoke_api(TEST_SERVER_IP, 9090)
+
+        self.assertTrue(result)
+        mock_client_cls.assert_called_once()
+        client_instance.check_health.assert_called_once_with()
 class InvokeGraphBuilderTests(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
