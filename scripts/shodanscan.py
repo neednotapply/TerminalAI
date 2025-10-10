@@ -4,6 +4,7 @@ import logging
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import shodan
@@ -12,6 +13,53 @@ import time
 import requests
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
+
+try:
+    from invoke_client import STATIC_MODEL_ENDPOINTS
+except ImportError:  # pragma: no cover - fallback for packaging edge cases
+    def _build_static_model_endpoints() -> List[Tuple[str, Optional[Dict[str, Any]]]]:
+        base_paths = [
+            "/api/v2/models",
+            "/api/v1/models",
+            "/api/v1/models/main",
+            "/api/v1/model-manager/models",
+            "/api/v1/model-manager/models/main",
+            "/api/v1/model_manager/models",
+            "/api/v1/model_manager/models/main",
+        ]
+
+        param_variants: Tuple[Optional[Dict[str, Any]], ...] = (
+            None,
+            {"model_type": "main"},
+            {"model_type": "primary"},
+            {"model_type": "checkpoint"},
+            {"model_type": "ckpt"},
+            {"type": "main"},
+            {"type": "primary"},
+            {"type": "checkpoint"},
+            {"type": "ckpt"},
+        )
+
+        endpoints: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+        seen: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
+
+        for raw_path in base_paths:
+            normalized = f"/{raw_path.strip('/')}" if raw_path else "/api/v1/models"
+            path_variants = {normalized.rstrip("/")}
+            path_variants.add(f"{normalized.rstrip('/')}/")
+
+            for path in path_variants:
+                for params in param_variants:
+                    param_items = tuple(sorted(params.items())) if params else tuple()
+                    key = (path, param_items)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    endpoints.append((path, params))
+
+        return endpoints
+
+    STATIC_MODEL_ENDPOINTS = _build_static_model_endpoints()
 
 urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -232,10 +280,40 @@ def _parse_invoke_models(payload):
         models = []
         for item in payload:
             if isinstance(item, dict):
-                name = item.get("name") or item.get("id") or item.get("key")
+                model_type = item.get("type") or item.get("model_type")
+                normalized_type = str(model_type).lower() if model_type is not None else ""
+                if normalized_type:
+                    skip_tokens = (
+                        "lora",
+                        "embedding",
+                        "textual",
+                        "vae",
+                        "control",
+                        "adapter",
+                        "clip",
+                        "ip_adapter",
+                        "t2i",
+                    )
+                    if any(token in normalized_type for token in skip_tokens):
+                        continue
+                    if not any(
+                        keyword in normalized_type
+                        for keyword in ("main", "onnx", "checkpoint", "model", "base", "core")
+                    ):
+                        continue
+                name = (
+                    item.get("name")
+                    or item.get("id")
+                    or item.get("key")
+                    or item.get("model_name")
+                )
                 if not name:
                     continue
-                base = item.get("base") or item.get("base_model") or item.get("model_base")
+                base = (
+                    item.get("base")
+                    or item.get("base_model")
+                    or item.get("model_base")
+                )
                 models.append(f"{name} ({base})" if base else name)
             elif isinstance(item, str):
                 name = item.strip()
@@ -257,6 +335,83 @@ def _parse_invoke_models(payload):
                 if collected:
                     return collected
     return []
+
+
+def _discover_invoke_model_endpoints(
+    base: str, headers: Optional[Dict[str, str]], verify: bool
+) -> List[Tuple[str, Optional[Dict[str, Any]]]]:
+    discovered: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    seen: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
+    for suffix in ("/openapi.json", "/docs/openapi.json"):
+        url = f"{base}{suffix}"
+        try:
+            resp = requests.get(url, timeout=5, headers=headers, verify=verify)
+            resp.raise_for_status()
+        except requests.RequestException:
+            continue
+
+        try:
+            spec = resp.json()
+        except ValueError:
+            continue
+
+        if not isinstance(spec, dict):
+            continue
+
+        paths = spec.get("paths")
+        if not isinstance(paths, dict):
+            continue
+
+        for raw_path, operations in paths.items():
+            if not isinstance(raw_path, str):
+                continue
+            lowered = raw_path.lower()
+            if "model" not in lowered:
+                continue
+            if "{" in raw_path:
+                continue
+            if not raw_path.startswith("/"):
+                raw_path = f"/{raw_path}"
+
+            get_op = operations.get("get") if isinstance(operations, dict) else None
+            if not isinstance(get_op, dict):
+                continue
+
+            param_candidates: List[Optional[Dict[str, Any]]] = [None]
+            parameters: List[Dict[str, Any]] = []
+            for source in (operations.get("parameters"), get_op.get("parameters")):
+                if isinstance(source, list):
+                    parameters.extend(
+                        [p for p in source if isinstance(p, dict) and p.get("in") == "query"]
+                    )
+
+            for param in parameters:
+                if param.get("name") != "model_type":
+                    continue
+                schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
+                values = schema.get("enum") if isinstance(schema.get("enum"), list) else []
+                options = [v for v in values if isinstance(v, str)]
+                if not options:
+                    options = ["main"]
+                for value in options:
+                    if value.lower() in {"main", "checkpoint", "primary"}:
+                        param_candidates.append({"model_type": value})
+
+            for param in param_candidates:
+                variants = {raw_path}
+                if raw_path.endswith("/"):
+                    variants.add(raw_path.rstrip("/"))
+                else:
+                    variants.add(f"{raw_path}/")
+                for variant in variants:
+                    param_items = tuple(sorted(param.items())) if param else tuple()
+                    key = (variant, param_items)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    discovered.append((variant, param))
+
+    return discovered
 
 
 def check_invoke_api(ip, port, hostname=None):
@@ -291,19 +446,24 @@ def check_invoke_api(ip, port, hostname=None):
                 last_error = str(e)
                 continue
 
-            model_candidates = [
-                ("/api/v2/models", {"model_type": "main"}),
-                ("/api/v1/models", {"model_type": "main"}),
-                ("/api/v1/models", {"type": "main"}),
-                ("/api/v1/models/main", None),
-                ("/api/v1/model-manager/models", {"model_type": "main"}),
-                ("/api/v1/model-manager/models", None),
-                ("/api/v1/model_manager/models", {"model_type": "main"}),
-                ("/api/v1/model_manager/models", None),
-            ]
+            model_candidates: List[Tuple[str, Optional[Dict[str, Any]]]] = list(
+                STATIC_MODEL_ENDPOINTS
+            )
+            model_candidates.extend(
+                _discover_invoke_model_endpoints(base, headers, verify_tls)
+            )
+
+            seen_candidates: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
 
             for path, params in model_candidates:
-                url = f"{base}{path}"
+                normalized_path = path if path.startswith("/") else f"/{path}"
+                param_items = tuple(sorted(params.items())) if params else tuple()
+                key = (normalized_path, param_items)
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+
+                url = f"{base}{normalized_path}"
                 try:
                     resp = requests.get(
                         url,

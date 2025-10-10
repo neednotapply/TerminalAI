@@ -6,7 +6,7 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
@@ -18,6 +18,54 @@ DEFAULT_HEIGHT = 1024
 QUEUE_ID = "default"
 ORIGIN = "terminalai"
 DESTINATION = "terminalai"
+
+
+def _build_static_model_endpoints() -> List[Tuple[str, Optional[Dict[str, Any]]]]:
+    """Return a deduplicated list of known InvokeAI model endpoints."""
+
+    base_paths = [
+        "/api/v2/models",
+        "/api/v1/models",
+        "/api/v1/models/main",
+        "/api/v1/model-manager/models",
+        "/api/v1/model-manager/models/main",
+        "/api/v1/model_manager/models",
+        "/api/v1/model_manager/models/main",
+    ]
+
+    param_variants: Tuple[Optional[Dict[str, Any]], ...] = (
+        None,
+        {"model_type": "main"},
+        {"model_type": "primary"},
+        {"model_type": "checkpoint"},
+        {"model_type": "ckpt"},
+        {"type": "main"},
+        {"type": "primary"},
+        {"type": "checkpoint"},
+        {"type": "ckpt"},
+    )
+
+    endpoints: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    seen: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
+
+    for raw_path in base_paths:
+        normalized = f"/{raw_path.strip('/')}" if raw_path else "/api/v1/models"
+        path_variants = {normalized.rstrip("/")}
+        path_variants.add(f"{normalized.rstrip('/')}/")
+
+        for path in path_variants:
+            for params in param_variants:
+                param_items = tuple(sorted(params.items())) if params else tuple()
+                key = (path, param_items)
+                if key in seen:
+                    continue
+                seen.add(key)
+                endpoints.append((path, params))
+
+    return endpoints
+
+
+STATIC_MODEL_ENDPOINTS: List[Tuple[str, Optional[Dict[str, Any]]]] = _build_static_model_endpoints()
 
 
 class InvokeAIClientError(RuntimeError):
@@ -113,40 +161,45 @@ class InvokeAIClient:
     def list_models(self) -> List[InvokeAIModel]:
         """Return the available main models on the server."""
 
-        candidates = [
-            ("/api/v2/models", {"model_type": "main"}),
-            ("/api/v1/models", {"model_type": "main"}),
-            ("/api/v1/models", {"type": "main"}),
-            ("/api/v1/models/main", None),
-            ("/api/v1/model-manager/models", {"model_type": "main"}),
-            ("/api/v1/model-manager/models", None),
-            ("/api/v1/model_manager/models", {"model_type": "main"}),
-            ("/api/v1/model_manager/models", None),
-        ]
-        last_http_error: Optional[requests.HTTPError] = None
+        soft_error_statuses = {400, 401, 403, 404, 405, 406, 415, 422, 429, 500, 503}
+        last_error: Optional[BaseException] = None
+        attempted: set[Tuple[str, str, Tuple[Tuple[str, Any], ...]]] = set()
 
-        for path, params in candidates:
-            url = f"{self.base_url}{path}"
-            try:
-                resp = requests.get(url, params=params, timeout=10)
-                resp.raise_for_status()
-            except requests.HTTPError as exc:
-                status = exc.response.status_code if exc.response is not None else None
-                if status == 404:
-                    last_http_error = exc
+        for base_url in list(self._base_urls):
+            for path, params in self._candidate_model_endpoints(base_url):
+                normalized_path = path if path.startswith("/") else f"/{path}"
+                param_items = tuple(sorted(params.items())) if params else tuple()
+                key = (base_url, normalized_path, param_items)
+                if key in attempted:
                     continue
-                raise
+                attempted.add(key)
 
-            models = self._parse_models_payload(resp.json())
-            if models is None:
-                continue
-            models.sort(key=lambda m: m.name.lower())
-            return models
+                url = f"{base_url}{normalized_path}"
+                try:
+                    resp = requests.get(url, params=params, timeout=10)
+                    resp.raise_for_status()
+                except requests.HTTPError as exc:
+                    status = exc.response.status_code if exc.response is not None else None
+                    if status in soft_error_statuses:
+                        last_error = exc
+                        continue
+                    raise
+                except requests.RequestException as exc:
+                    last_error = exc
+                    continue
 
-        if last_http_error is not None:
+                models = self._parse_models_payload(self._safe_json(resp))
+                if not models:
+                    continue
+
+                models.sort(key=lambda m: m.name.lower())
+                self._promote_base_url(base_url)
+                return models
+
+        if last_error is not None:
             raise InvokeAIClientError(
                 "InvokeAI server did not expose a compatible models endpoint"
-            ) from last_http_error
+            ) from last_error
 
         raise InvokeAIClientError("InvokeAI server did not return a valid models list")
 
@@ -155,6 +208,95 @@ class InvokeAIClient:
             return response.json()
         except ValueError:
             return None
+
+    def _candidate_model_endpoints(
+        self, base_url: str
+    ) -> Iterable[Tuple[str, Optional[Dict[str, Any]]]]:
+        """Yield possible models endpoints, combining static and discovered paths."""
+
+        for path, params in STATIC_MODEL_ENDPOINTS:
+            yield path, params
+
+        for path, params in self._discover_model_endpoints(base_url):
+            yield path, params
+
+    def _discover_model_endpoints(
+        self, base_url: str
+    ) -> List[Tuple[str, Optional[Dict[str, Any]]]]:
+        """Discover InvokeAI model endpoints from the server's OpenAPI schema."""
+
+        discovered: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+        seen: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
+        for suffix in ("/openapi.json", "/docs/openapi.json"):
+            url = f"{base_url}{suffix}"
+            try:
+                resp = requests.get(url, timeout=5)
+                resp.raise_for_status()
+            except requests.RequestException:
+                continue
+
+            spec = self._safe_json(resp)
+            if not isinstance(spec, dict):
+                continue
+
+            paths = spec.get("paths")
+            if not isinstance(paths, dict):
+                continue
+
+            for raw_path, operations in paths.items():
+                if not isinstance(raw_path, str):
+                    continue
+                path_lower = raw_path.lower()
+                if "model" not in path_lower:
+                    continue
+                if "{" in raw_path:
+                    continue
+                if not raw_path.startswith("/"):
+                    raw_path = f"/{raw_path}"
+
+                get_op = operations.get("get") if isinstance(operations, dict) else None
+                if not isinstance(get_op, dict):
+                    continue
+
+                param_candidates: List[Optional[Dict[str, Any]]] = [None]
+                parameters: List[Dict[str, Any]] = []
+                for source in (operations.get("parameters"), get_op.get("parameters")):
+                    if isinstance(source, list):
+                        parameters.extend(
+                            [p for p in source if isinstance(p, dict) and p.get("in") == "query"]
+                        )
+
+                for param in parameters:
+                    name = param.get("name")
+                    if name not in {"model_type", "type"}:
+                        continue
+                    schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
+                    values = schema.get("enum") if isinstance(schema.get("enum"), list) else []
+                    options = [v for v in values if isinstance(v, str)]
+                    if not options:
+                        options = ["main", "primary", "checkpoint", "ckpt"]
+                    for value in options:
+                        if value and value.lower() in {"main", "checkpoint", "primary", "ckpt"}:
+                            param_candidates.append({name: value})
+
+                for param in param_candidates:
+                    normalized_path = raw_path
+                    if normalized_path.endswith("//"):
+                        normalized_path = normalized_path.rstrip("/")
+                    variants = {normalized_path}
+                    if normalized_path.endswith("/"):
+                        variants.add(normalized_path.rstrip("/"))
+                    else:
+                        variants.add(f"{normalized_path}/")
+                    for variant in variants:
+                        param_items = tuple(sorted(param.items())) if param else tuple()
+                        key = (variant, param_items)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        discovered.append((variant, param))
+
+        return discovered
 
     def _build_base_urls(self, scheme: str, allow_https_fallback: bool) -> List[str]:
         normalized = (scheme or "http").lower().rstrip(":/")
@@ -184,7 +326,14 @@ class InvokeAIClient:
         if isinstance(payload, list):
             items = [item for item in payload if isinstance(item, dict)]
         elif isinstance(payload, dict):
-            for key in ("models", "items", "data"):
+            for key in (
+                "models",
+                "items",
+                "data",
+                "results",
+                "records",
+                "entries",
+            ):
                 candidate = payload.get(key)
                 if isinstance(candidate, list):
                     items = [item for item in candidate if isinstance(item, dict)]
@@ -199,21 +348,45 @@ class InvokeAIClient:
                     if nested_items:
                         items = nested_items
                         break
-            if items is None and "results" in payload and isinstance(payload["results"], list):
-                items = [item for item in payload["results"] if isinstance(item, dict)]
+            if items is None:
+                for fallback_key in ("result", "available_models", "models_list"):
+                    candidate = payload.get(fallback_key)
+                    if isinstance(candidate, list):
+                        items = [item for item in candidate if isinstance(item, dict)]
+                        break
 
         if items is None:
             return None
 
         models: List[InvokeAIModel] = []
+        skip_tokens = (
+            "lora",
+            "embedding",
+            "textual",
+            "vae",
+            "control",
+            "adapter",
+            "clip",
+            "ip_adapter",
+            "t2i",
+        )
+
         for item in items:
             model_type = item.get("type") or item.get("model_type")
-            if model_type not in (None, "main", "Main"):
+            normalized_type = str(model_type).lower() if model_type is not None else ""
+            if normalized_type and any(token in normalized_type for token in skip_tokens):
                 continue
             name = item.get("name") or item.get("id") or item.get("key")
             if not name:
+                name = item.get("model_name")
+            if not name:
                 continue
-            base = (item.get("base") or item.get("base_model") or "").lower()
+            base = (
+                item.get("base")
+                or item.get("base_model")
+                or item.get("model_base")
+                or ""
+            ).lower()
             models.append(InvokeAIModel(name=name, base=base, key=item.get("key"), raw=item))
 
         return models
