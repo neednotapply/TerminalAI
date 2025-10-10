@@ -22,7 +22,18 @@ from invoke_client import (
     DEFAULT_WIDTH,
     InvokeAIClient,
     InvokeAIClientError,
+    InvokeAIModel,
 )
+
+try:
+    import chafa
+except ImportError:  # pragma: no cover - optional dependency
+    chafa = None
+
+try:
+    from PIL import Image as PILImage
+except ImportError:  # pragma: no cover - optional dependency
+    PILImage = None
 
 if os.name == "nt":
     import msvcrt
@@ -560,23 +571,111 @@ if os.name != "nt":
     interactive_menu = curses_menu
 
 
-def display_with_chafa(image_path):
-    if os.name == "nt":
-        print(f"{YELLOW}Preview not supported on Windows. Image saved to {image_path}{RESET}")
-        return
+def _display_with_chafapy(image_path: Path) -> bool:
+    if chafa is None or PILImage is None:
+        return False
+
+    try:
+        with PILImage.open(image_path) as pil_image:
+            pil_image = pil_image.convert("RGBA")
+            width, height = pil_image.size
+            pixels = pil_image.tobytes()
+    except Exception as exc:  # pragma: no cover - depends on runtime image data
+        print(f"{YELLOW}Failed to load image preview: {exc}. Image saved to {image_path}{RESET}")
+        return False
+
+    try:
+        term_size = shutil.get_terminal_size(fallback=(80, 24))
+        config = chafa.CanvasConfig()
+        config.pixel_mode = chafa.PixelMode.CHAFA_PIXEL_MODE_SYMBOLS
+        config.width = max(1, term_size.columns)
+        config.height = max(1, term_size.lines - 2)
+        try:
+            config.calc_canvas_geometry(width, height, font_ratio=0.5, zoom=True)
+        except Exception:  # pragma: no cover - depends on chafa implementation
+            pass
+
+        canvas = chafa.Canvas(config)
+        canvas.draw_all_pixels(
+            chafa.PixelType.CHAFA_PIXEL_RGBA8_UNASSOCIATED,
+            pixels,
+            width,
+            height,
+            width * 4,
+        )
+        output = canvas.print(fallback=True)
+        sys.stdout.write(output.decode("utf-8", errors="ignore"))
+        if not output.endswith(b"\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        return True
+    except Exception as exc:  # pragma: no cover - depends on terminal capabilities
+        print(
+            f"{YELLOW}Failed to render image preview with chafa.py: {exc}. Falling back to chafa CLI if available.{RESET}"
+        )
+        return False
+
+
+def _display_with_chafa_cli(image_path: Path) -> None:
     try:
         result = subprocess.run(["chafa", str(image_path)], check=False)
         if result.returncode not in (0, 1):
             print(f"{YELLOW}chafa returned code {result.returncode}. Image saved to {image_path}{RESET}")
     except FileNotFoundError:
         print(
-            f"{YELLOW}chafa not installed. Install from https://hpjansson.org/chafa/ to preview images.{RESET}"
+            f"{YELLOW}chafa CLI not installed. Install it from https://hpjansson.org/chafa/ or add the 'chafa.py' and 'Pillow' Python packages to enable previews.{RESET}"
         )
+
+
+def display_with_chafa(image_path):
+    if os.name == "nt":
+        print(f"{YELLOW}Preview not supported on Windows. Image saved to {image_path}{RESET}")
+        return
+
+    path = Path(image_path)
+    if _display_with_chafapy(path):
+        return
+
+    _display_with_chafa_cli(path)
 
 
 def confirm_exit():
     choice = interactive_menu("Exit?", ["No", "Yes"])
     return choice == 1
+
+
+def _invoke_generate_image(
+    client: InvokeAIClient,
+    model: "InvokeAIModel",
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    cfg_scale: float,
+    scheduler: str,
+    seed: Optional[int],
+    timeout: float,
+):
+    prompt_text = (prompt or "").strip()
+    if not prompt_text:
+        raise InvokeAIClientError("Prompt must not be empty")
+
+    negative_text = (negative_prompt or "").strip()
+    scheduler_name = (scheduler or "").strip() or DEFAULT_SCHEDULER
+
+    return client.generate_image(
+        model=model,
+        prompt=prompt_text,
+        negative_prompt=negative_text,
+        width=int(width),
+        height=int(height),
+        steps=int(steps),
+        cfg_scale=float(cfg_scale),
+        scheduler=scheduler_name,
+        seed=seed,
+        timeout=float(timeout),
+    )
 
 
 def prompt_int(prompt, default, minimum=None, maximum=None):
@@ -1598,7 +1697,7 @@ def run_image_mode():
                 scheduler = get_input(f"{CYAN}Scheduler [{DEFAULT_SCHEDULER}]: {RESET}")
                 if scheduler == "ESC":
                     break
-                scheduler = scheduler.strip() or DEFAULT_SCHEDULER
+                scheduler = scheduler.strip()
                 seed_text = get_input(f"{CYAN}Seed (blank=random): {RESET}")
                 if seed_text == "ESC":
                     break
@@ -1615,16 +1714,18 @@ def run_image_mode():
                 height = max(64, (height // 8) * 8)
 
                 try:
-                    result = client.generate_image(
-                        model=model,
-                        prompt=prompt.strip(),
-                        negative_prompt=(negative or "").strip(),
-                        width=width,
-                        height=height,
-                        steps=steps,
-                        cfg_scale=cfg_scale,
-                        scheduler=scheduler,
-                        seed=seed_val,
+                    result = _invoke_generate_image(
+                        client,
+                        model,
+                        prompt,
+                        negative,
+                        width,
+                        height,
+                        steps,
+                        cfg_scale,
+                        scheduler,
+                        seed_val,
+                        REQUEST_TIMEOUT,
                     )
                 except InvokeAIClientError as exc:
                     print(f"{RED}{exc}{RESET}")
