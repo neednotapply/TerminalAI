@@ -20,14 +20,16 @@ HEADER_LINES = [
 ]
 
 MENU_OPTIONS = [
-    {"label": "TerminalAI (Full Menu)", "script": "TerminalAI.py", "extra_args": []},
-    {"label": "Chat with LLM", "script": "TerminalAI.py", "extra_args": ["--mode", "chat"]},
     {
-        "label": "Generate Image (InvokeAI)",
+        "label": "Chat with Ollama",
+        "script": "TerminalAI.py",
+        "extra_args": ["--mode", "chat"],
+    },
+    {
+        "label": "Generate Images with InvokeAI",
         "script": "TerminalAI.py",
         "extra_args": ["--mode", "image"],
     },
-    {"label": "Scan Shodan", "script": "shodanscan.py", "extra_args": []},
 ]
 
 OPTIONS = [opt["label"] for opt in MENU_OPTIONS]
