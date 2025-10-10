@@ -11,6 +11,22 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 DEFAULT_SCHEDULER = "dpmpp_2m"
+DEFAULT_SCHEDULER_OPTIONS: Tuple[str, ...] = (
+    "ddim",
+    "ddpm",
+    "dpmpp_2m",
+    "dpmpp_2m_karras",
+    "dpmpp_2s",
+    "dpmpp_sde",
+    "dpmpp_sde_karras",
+    "dpm_solver",
+    "euler",
+    "euler_a",
+    "heun",
+    "lms",
+    "pndm",
+    "uni_pc",
+)
 DEFAULT_CFG_SCALE = 7.5
 DEFAULT_STEPS = 30
 DEFAULT_WIDTH = 1024
@@ -203,6 +219,28 @@ class InvokeAIClient:
 
         raise InvokeAIClientError("InvokeAI server did not return a valid models list")
 
+    def list_schedulers(self) -> List[str]:
+        """Return the available scheduler names advertised by the server."""
+
+        last_error: Optional[BaseException] = None
+        for base_url in list(self._base_urls):
+            try:
+                discovered = self._discover_scheduler_options(base_url)
+            except requests.RequestException as exc:
+                last_error = exc
+                continue
+
+            if discovered:
+                self._promote_base_url(base_url)
+                return discovered
+
+        if last_error is not None:
+            raise InvokeAIClientError(
+                "Failed to query InvokeAI scheduler metadata"
+            ) from last_error
+
+        return sorted(DEFAULT_SCHEDULER_OPTIONS)
+
     def _safe_json(self, response: requests.Response) -> Any:
         try:
             return response.json()
@@ -225,78 +263,135 @@ class InvokeAIClient:
     ) -> List[Tuple[str, Optional[Dict[str, Any]]]]:
         """Discover InvokeAI model endpoints from the server's OpenAPI schema."""
 
+        try:
+            spec = self._load_openapi_spec(base_url)
+        except requests.RequestException:
+            return []
+        if not isinstance(spec, dict):
+            return []
+
         discovered: List[Tuple[str, Optional[Dict[str, Any]]]] = []
         seen: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
+        paths = spec.get("paths")
+        if not isinstance(paths, dict):
+            return []
+
+        for raw_path, operations in paths.items():
+            if not isinstance(raw_path, str):
+                continue
+            path_lower = raw_path.lower()
+            if "model" not in path_lower:
+                continue
+            if "{" in raw_path:
+                continue
+            if not raw_path.startswith("/"):
+                raw_path = f"/{raw_path}"
+
+            get_op = operations.get("get") if isinstance(operations, dict) else None
+            if not isinstance(get_op, dict):
+                continue
+
+            param_candidates: List[Optional[Dict[str, Any]]] = [None]
+            parameters: List[Dict[str, Any]] = []
+            for source in (operations.get("parameters"), get_op.get("parameters")):
+                if isinstance(source, list):
+                    parameters.extend(
+                        [p for p in source if isinstance(p, dict) and p.get("in") == "query"]
+                    )
+
+            for param in parameters:
+                name = param.get("name")
+                if name not in {"model_type", "type"}:
+                    continue
+                schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
+                values = schema.get("enum") if isinstance(schema.get("enum"), list) else []
+                options = [v for v in values if isinstance(v, str)]
+                if not options:
+                    options = ["main", "primary", "checkpoint", "ckpt"]
+                for value in options:
+                    if value and value.lower() in {"main", "checkpoint", "primary", "ckpt"}:
+                        param_candidates.append({name: value})
+
+            for param in param_candidates:
+                normalized_path = raw_path
+                if normalized_path.endswith("//"):
+                    normalized_path = normalized_path.rstrip("/")
+                variants = {normalized_path}
+                if normalized_path.endswith("/"):
+                    variants.add(normalized_path.rstrip("/"))
+                else:
+                    variants.add(f"{normalized_path}/")
+                for variant in variants:
+                    param_items = tuple(sorted(param.items())) if param else tuple()
+                    key = (variant, param_items)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    discovered.append((variant, param))
+
+        return discovered
+
+    def _load_openapi_spec(self, base_url: str) -> Optional[Dict[str, Any]]:
+        last_error: Optional[requests.RequestException] = None
         for suffix in ("/openapi.json", "/docs/openapi.json"):
             url = f"{base_url}{suffix}"
             try:
                 resp = requests.get(url, timeout=5)
-                resp.raise_for_status()
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                last_error = exc
+                continue
+
+            if resp.status_code and resp.status_code >= 400:
                 continue
 
             spec = self._safe_json(resp)
-            if not isinstance(spec, dict):
-                continue
+            if isinstance(spec, dict):
+                return spec
 
-            paths = spec.get("paths")
-            if not isinstance(paths, dict):
-                continue
+        if last_error is not None:
+            raise last_error
 
-            for raw_path, operations in paths.items():
-                if not isinstance(raw_path, str):
-                    continue
-                path_lower = raw_path.lower()
-                if "model" not in path_lower:
-                    continue
-                if "{" in raw_path:
-                    continue
-                if not raw_path.startswith("/"):
-                    raw_path = f"/{raw_path}"
+        return None
 
-                get_op = operations.get("get") if isinstance(operations, dict) else None
-                if not isinstance(get_op, dict):
-                    continue
+    def _discover_scheduler_options(self, base_url: str) -> List[str]:
+        try:
+            spec = self._load_openapi_spec(base_url)
+        except requests.RequestException as exc:
+            raise exc
+        if not isinstance(spec, dict):
+            return []
 
-                param_candidates: List[Optional[Dict[str, Any]]] = [None]
-                parameters: List[Dict[str, Any]] = []
-                for source in (operations.get("parameters"), get_op.get("parameters")):
-                    if isinstance(source, list):
-                        parameters.extend(
-                            [p for p in source if isinstance(p, dict) and p.get("in") == "query"]
-                        )
+        results: set[str] = set()
+        self._collect_scheduler_enums(spec, hinted=False, results=results)
 
-                for param in parameters:
-                    name = param.get("name")
-                    if name not in {"model_type", "type"}:
-                        continue
-                    schema = param.get("schema") if isinstance(param.get("schema"), dict) else {}
-                    values = schema.get("enum") if isinstance(schema.get("enum"), list) else []
-                    options = [v for v in values if isinstance(v, str)]
-                    if not options:
-                        options = ["main", "primary", "checkpoint", "ckpt"]
-                    for value in options:
-                        if value and value.lower() in {"main", "checkpoint", "primary", "ckpt"}:
-                            param_candidates.append({name: value})
+        if not results:
+            return []
 
-                for param in param_candidates:
-                    normalized_path = raw_path
-                    if normalized_path.endswith("//"):
-                        normalized_path = normalized_path.rstrip("/")
-                    variants = {normalized_path}
-                    if normalized_path.endswith("/"):
-                        variants.add(normalized_path.rstrip("/"))
-                    else:
-                        variants.add(f"{normalized_path}/")
-                    for variant in variants:
-                        param_items = tuple(sorted(param.items())) if param else tuple()
-                        key = (variant, param_items)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        discovered.append((variant, param))
+        return sorted(results)
 
-        return discovered
+    def _collect_scheduler_enums(self, node: Any, hinted: bool, results: set[str]) -> None:
+        if isinstance(node, dict):
+            local_hint = hinted
+            for key in ("name", "title", "description"):
+                value = node.get(key)
+                if isinstance(value, str) and "scheduler" in value.lower():
+                    local_hint = True
+                    break
+
+            enum_values = node.get("enum")
+            if local_hint and isinstance(enum_values, list):
+                for entry in enum_values:
+                    if isinstance(entry, str):
+                        text = entry.strip()
+                        if text:
+                            results.add(text)
+
+            for key, value in node.items():
+                next_hint = local_hint or (isinstance(key, str) and "scheduler" in key.lower())
+                self._collect_scheduler_enums(value, next_hint, results)
+        elif isinstance(node, list):
+            for item in node:
+                self._collect_scheduler_enums(item, hinted, results)
 
     def _build_base_urls(self, scheme: str, allow_https_fallback: bool) -> List[str]:
         normalized = (scheme or "http").lower().rstrip(":/")
@@ -439,13 +534,22 @@ class InvokeAIClient:
         enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
         resp = requests.post(enqueue_url, json=body, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-        item_ids = data.get("item_ids", [])
-        if not item_ids:
-            raise InvokeAIClientError("InvokeAI did not return a queue item id")
-        item_id = item_ids[0]
+        data = self._safe_json(resp)
 
-        session = self._poll_queue(item_id=item_id, timeout=timeout)
+        item_id = self._extract_queue_item_id(data)
+        if item_id is None:
+            location_header = getattr(resp, "headers", {}).get("Location") if hasattr(resp, "headers") else None
+            item_id = self._extract_queue_item_id_from_location(location_header)
+
+        session: Optional[Dict[str, Any]] = None
+        if item_id is not None:
+            session = self._poll_queue(item_id=item_id, timeout=timeout)
+        else:
+            session = self._extract_session_from_enqueue_response(data)
+            if session is None:
+                raise InvokeAIClientError("InvokeAI did not return a queue item id")
+            item_id = self._extract_queue_item_id(session, allow_generic_id=False)
+
         output_node = graph_info["output"]
         result = self._extract_image_result(session, output_node)
         image_info = result.get("image") or result.get("images")
@@ -507,8 +611,12 @@ class InvokeAIClient:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _poll_queue(self, item_id: int, timeout: float) -> Dict[str, Any]:
-        status_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/i/{item_id}"
+    def _poll_queue(self, item_id: Any, timeout: float) -> Dict[str, Any]:
+        item_id_str = str(item_id).strip()
+        if not item_id_str:
+            raise InvokeAIClientError("Invalid queue item id")
+
+        status_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/i/{item_id_str}"
         start = time.time()
         last_status = None
         while True:
@@ -518,7 +626,11 @@ class InvokeAIClient:
                 )
             resp = requests.get(status_url, timeout=10)
             resp.raise_for_status()
-            payload = resp.json()
+            payload = self._safe_json(resp)
+            if not isinstance(payload, dict):
+                raise InvokeAIClientError(
+                    "InvokeAI queue status response was not valid JSON"
+                )
             status = payload.get("status")
             last_status = status
             if status == "completed":
@@ -686,6 +798,130 @@ class InvokeAIClient:
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
         return {"graph": graph, "data": None, "output": "latents_to_image"}
+
+    def _extract_queue_item_id(
+        self, payload: Any, *, allow_generic_id: bool = True
+    ) -> Optional[str]:
+        """Extract a queue item identifier from an InvokeAI enqueue response."""
+
+        if payload is None:
+            return None
+
+        queue_keys = {
+            "item_id",
+            "item_ids",
+            "queue_item_id",
+            "queue_item_ids",
+        }
+        if allow_generic_id:
+            queue_keys.update({"id", "ids"})
+
+        to_visit: List[Any] = [payload]
+        while to_visit:
+            current = to_visit.pop(0)
+            if isinstance(current, dict):
+                is_session_like = self._looks_like_session_payload(current)
+                for key, value in current.items():
+                    if key in queue_keys:
+                        if is_session_like and key in {"id", "ids"}:
+                            continue
+                        normalized = self._normalize_queue_item_id(
+                            value, allow_generic_id=allow_generic_id
+                        )
+                        if normalized is not None:
+                            return normalized
+                    if isinstance(value, (dict, list)):
+                        to_visit.append(value)
+            elif isinstance(current, list):
+                to_visit.extend(item for item in current if isinstance(item, (dict, list)))
+
+        return None
+
+    def _normalize_queue_item_id(
+        self, value: Any, *, allow_generic_id: bool = True
+    ) -> Optional[str]:
+        if isinstance(value, list):
+            for entry in value:
+                normalized = self._normalize_queue_item_id(
+                    entry, allow_generic_id=allow_generic_id
+                )
+                if normalized is not None:
+                    return normalized
+            return None
+        if isinstance(value, dict):
+            return self._extract_queue_item_id(value, allow_generic_id=allow_generic_id)
+        if isinstance(value, (int, str)):
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _extract_queue_item_id_from_location(self, location: Optional[str]) -> Optional[str]:
+        if not isinstance(location, str):
+            return None
+
+        candidate = location.strip()
+        if not candidate:
+            return None
+
+        candidate = candidate.split("?", 1)[0].rstrip("/")
+        if not candidate:
+            return None
+
+        if "/i/" in candidate:
+            candidate = candidate.rsplit("/i/", 1)[-1]
+        else:
+            candidate = candidate.rsplit("/", 1)[-1]
+
+        candidate = candidate.strip().strip("/")
+        if candidate:
+            return candidate
+        return None
+
+    def _extract_session_from_enqueue_response(
+        self, payload: Any
+    ) -> Optional[Dict[str, Any]]:
+        if payload is None:
+            return None
+
+        to_visit: List[Any] = [payload]
+        while to_visit:
+            current = to_visit.pop(0)
+            if isinstance(current, dict):
+                if self._looks_like_session_payload(current):
+                    return current
+
+                session = current.get("session")
+                if isinstance(session, dict):
+                    return session
+
+                sessions = current.get("sessions")
+                if isinstance(sessions, list):
+                    for entry in sessions:
+                        if isinstance(entry, dict):
+                            return entry
+
+                for value in current.values():
+                    if isinstance(value, (dict, list)):
+                        to_visit.append(value)
+            elif isinstance(current, list):
+                to_visit.extend(item for item in current if isinstance(item, (dict, list)))
+
+        return None
+
+    def _looks_like_session_payload(self, candidate: Dict[str, Any]) -> bool:
+        if not isinstance(candidate, dict):
+            return False
+
+        results = candidate.get("results")
+        if not isinstance(results, dict):
+            return False
+
+        for key in ("id", "session_id", "queue_item_id", "item_id"):
+            if key in candidate:
+                return True
+
+        return False
 
     def _build_sdxl_graph(
         self,

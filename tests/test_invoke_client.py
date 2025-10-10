@@ -21,16 +21,20 @@ sys.modules.setdefault("invoke_client", importlib.import_module("scripts.invoke_
 
 import scripts.TerminalAI
 from scripts.invoke_client import (
+    DEFAULT_SCHEDULER,
     InvokeAIClient,
     InvokeAIModel,
+    InvokeAIClientError,
     QUEUE_ID,
 )
 
 
 class DummyResponse:
-    def __init__(self, json_data=None, status_code=200):
+    def __init__(self, json_data=None, status_code=200, headers=None, content=b""):
         self._json_data = json_data or {}
         self.status_code = status_code
+        self.headers = headers or {}
+        self.content = content
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -185,6 +189,119 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         self.assertEqual(info["output"], "latents_to_image")
         self.assertIsNone(info["data"])
 
+
+class InvokeSchedulerDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(self.tmpdir.name))
+
+    def test_list_schedulers_from_openapi(self):
+        spec_payload = {
+            "openapi": "3.1.0",
+            "components": {
+                "schemas": {
+                    "SchedulerParam": {
+                        "title": "Scheduler",
+                        "type": "string",
+                        "enum": ["ddim", "dpmpp_2m", "uni_pc"],
+                    }
+                }
+            },
+        }
+
+        with patch("requests.get", return_value=DummyResponse(spec_payload)) as mock_get:
+            schedulers = self.client.list_schedulers()
+
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertIn("ddim", schedulers)
+        self.assertIn("dpmpp_2m", schedulers)
+        self.assertIn("uni_pc", schedulers)
+
+    def test_list_schedulers_falls_back_to_default(self):
+        empty_spec = {"openapi": "3.1.0", "paths": {}}
+
+        with patch("requests.get", return_value=DummyResponse(empty_spec)):
+            schedulers = self.client.list_schedulers()
+
+        self.assertIn(DEFAULT_SCHEDULER, schedulers)
+        self.assertGreaterEqual(len(schedulers), 1)
+
+    def test_list_schedulers_raises_on_network_failure(self):
+        with patch("requests.get", side_effect=requests.RequestException("boom")):
+            with self.assertRaises(InvokeAIClientError):
+                self.client.list_schedulers()
+
+
+class InvokeQueueHandlingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(self.tmpdir.name))
+
+    def tearDown(self):
+        self.client = None
+
+    def test_extract_queue_item_id_from_location_header(self):
+        item_id = self.client._extract_queue_item_id_from_location(
+            "http://server/api/v1/queue/default/i/12345"
+        )
+        self.assertEqual(item_id, "12345")
+
+        self.assertIsNone(self.client._extract_queue_item_id_from_location(None))
+        self.assertIsNone(self.client._extract_queue_item_id_from_location(""))
+
+    def test_generate_image_uses_session_when_queue_id_missing(self):
+        model = InvokeAIModel(
+            name="test-model",
+            base="sdxl",
+            key="model-key",
+            raw={
+                "key": "model-key",
+                "hash": "hash",
+                "name": "Test Model",
+                "base": "sdxl",
+                "type": "main",
+            },
+        )
+
+        session_payload = {
+            "id": "session-abc",
+            "results": {
+                "latents_to_image": {
+                    "image": {
+                        "image_name": "image.png",
+                    }
+                }
+            },
+        }
+
+        enqueue_response = DummyResponse({"session": session_payload})
+        image_response = DummyResponse(status_code=200, content=b"fake-bytes")
+
+        with patch("requests.post", return_value=enqueue_response) as mock_post, patch(
+            "requests.get", return_value=image_response
+        ) as mock_get, patch.object(self.client, "_poll_queue") as mock_poll:
+            result = self.client.generate_image(
+                model=model,
+                prompt="a hamburger",
+                negative_prompt="",
+                width=512,
+                height=512,
+                steps=20,
+                cfg_scale=7.5,
+                scheduler=DEFAULT_SCHEDULER,
+                seed=123,
+                timeout=5,
+            )
+
+        mock_post.assert_called_once()
+        mock_poll.assert_not_called()
+        mock_get.assert_called_once()
+        self.assertIsNone(result["metadata"]["queue_item"])
+        self.assertEqual(result["metadata"]["session_id"], "session-abc")
+        self.assertTrue(result["path"].exists())
+        self.assertEqual(result["path"].read_bytes(), b"fake-bytes")
 
 if __name__ == "__main__":
     unittest.main()
