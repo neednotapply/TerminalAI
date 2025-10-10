@@ -1100,6 +1100,73 @@ def select_invoke_model(models):
             return models[choice]
 
 
+def select_scheduler_option(options: List[str], default_value: str) -> Optional[str]:
+    unique: List[str] = []
+    seen: set[str] = set()
+    for opt in options:
+        if not isinstance(opt, str):
+            continue
+        text = opt.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+
+    if default_value and default_value not in seen:
+        unique.insert(0, default_value)
+
+    manual_label = "Manual entry..."
+    back_label = "[Back]"
+
+    if DEBUG_MODE:
+        print(f"{CYAN}Available Schedulers:{RESET}")
+        for idx, value in enumerate(unique, 1):
+            marker = " (default)" if value == default_value else ""
+            print(f"{GREEN}{idx}. {value}{marker}{RESET}")
+        print(f"{GREEN}{len(unique) + 1}. {manual_label}{RESET}")
+        print(f"{GREEN}0. {back_label}{RESET}")
+        while True:
+            choice = get_input(f"{CYAN}Select scheduler: {RESET}")
+            if choice in ("ESC", "0") or choice.lower() == "back":
+                return None
+            if choice.isdigit():
+                idx = int(choice)
+                if 1 <= idx <= len(unique):
+                    return unique[idx - 1]
+                if idx == len(unique) + 1:
+                    entry = get_input(
+                        f"{CYAN}Enter scheduler name (blank=default): {RESET}"
+                    )
+                    if entry == "ESC":
+                        continue
+                    entry = entry.strip()
+                    return entry or default_value
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        labels = [
+            f"{value} (default)" if value == default_value else value for value in unique
+        ]
+        labels.append(manual_label)
+        labels.append(back_label)
+
+        while True:
+            choice = interactive_menu("InvokeAI Schedulers:", labels)
+            if choice is None:
+                return None
+            if choice < len(unique):
+                return unique[choice]
+            if choice == len(unique):
+                entry = get_input(f"{CYAN}Enter scheduler name (blank=default): {RESET}")
+                if entry == "ESC":
+                    continue
+                entry = entry.strip()
+                return entry or default_value
+            if choice == len(unique) + 1:
+                return None
+
+    return default_value
+
+
 def fetch_models():
     try:
         r = requests.get(f"{SERVER_URL}/v1/models", timeout=5)
@@ -1733,6 +1800,18 @@ def run_image_mode():
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
 
+        try:
+            scheduler_options = client.list_schedulers()
+        except InvokeAIClientError as exc:
+            print(f"{YELLOW}Failed to retrieve scheduler list: {exc}{RESET}")
+            scheduler_options = []
+        except requests.RequestException as exc:
+            print(f"{YELLOW}Failed to retrieve scheduler list: {exc}{RESET}")
+            scheduler_options = []
+
+        if not scheduler_options:
+            scheduler_options = [DEFAULT_SCHEDULER]
+
         while True:
             model = select_invoke_model(models)
             if model is None:
@@ -1759,10 +1838,9 @@ def run_image_mode():
                 cfg_scale = prompt_float("CFG Scale", DEFAULT_CFG_SCALE, minimum=0.0)
                 if cfg_scale is None:
                     break
-                scheduler = get_input(f"{CYAN}Scheduler [{DEFAULT_SCHEDULER}]: {RESET}")
-                if scheduler == "ESC":
+                scheduler = select_scheduler_option(scheduler_options, DEFAULT_SCHEDULER)
+                if scheduler is None:
                     break
-                scheduler = scheduler.strip()
                 seed_text = get_input(f"{CYAN}Seed (blank=random): {RESET}")
                 if seed_text == "ESC":
                     break
