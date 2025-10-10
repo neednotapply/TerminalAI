@@ -11,6 +11,7 @@ import re
 import threading
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from rain import rain
@@ -913,7 +914,24 @@ def check_invoke_api(ip, port):
         return False
 
 
-def update_pings(target_api=None):
+def _probe_endpoint(api_type, ip, port, perform_api_check):
+    latency = ping_time(ip, port)
+    api_ok = None
+    if latency is not None and perform_api_check:
+        if api_type == "invokeai":
+            api_ok = check_invoke_api(ip, port)
+        else:
+            api_ok = check_ollama_api(ip, port)
+    return latency, api_ok
+
+
+def update_pings(
+    target_api=None,
+    *,
+    verify_api=True,
+    update_activity=True,
+    max_workers=8,
+):
     apis = [target_api] if target_api else list(CSV_PATHS.keys())
     for api in apis:
         df = read_endpoints(api)
@@ -924,26 +942,72 @@ def update_pings(target_api=None):
         if "is_active" not in df.columns:
             df["is_active"] = True
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        candidates = []
         for idx, row in df.iterrows():
-            if not normalise_bool(row.get("is_active", True)):
+            currently_active = normalise_bool(row.get("is_active", True))
+            if update_activity and not currently_active:
                 continue
-            latency = ping_time(row["ip"], row["port"])
-            if latency is None:
+
+            ip = str(row.get("ip", "")).strip()
+            port_val = row.get("port")
+            try:
+                port = int(port_val)
+            except (TypeError, ValueError):
+                port = None
+
+            if not ip or port is None:
                 df.at[idx, "ping"] = pd.NA
-                df.at[idx, "is_active"] = False
-                if "inactive_reason" in df.columns:
-                    df.at[idx, "inactive_reason"] = "ping timeout"
-            else:
-                if api == "invokeai":
-                    api_ok = check_invoke_api(row["ip"], row["port"])
+                if update_activity and currently_active:
+                    df.at[idx, "is_active"] = False
+                    if "inactive_reason" in df.columns:
+                        df.at[idx, "inactive_reason"] = "invalid endpoint"
+                if "last_check_date" in df.columns:
+                    df.at[idx, "last_check_date"] = now
+                continue
+
+            perform_api_check = verify_api and update_activity
+            candidates.append((idx, ip, port, currently_active, perform_api_check))
+
+        if not candidates:
+            write_endpoints(api, df)
+            continue
+
+        worker_count = max(1, min(max_workers, len(candidates)))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {}
+            for idx, ip, port, currently_active, perform_api_check in candidates:
+                future = executor.submit(
+                    _probe_endpoint,
+                    api,
+                    ip,
+                    port,
+                    perform_api_check,
+                )
+                future_map[future] = (idx, currently_active)
+
+            for future in as_completed(future_map):
+                idx, currently_active = future_map[future]
+                latency, api_ok = future.result()
+
+                if latency is None:
+                    df.at[idx, "ping"] = pd.NA
+                    if update_activity and currently_active:
+                        df.at[idx, "is_active"] = False
+                        if "inactive_reason" in df.columns:
+                            df.at[idx, "inactive_reason"] = "ping timeout"
                 else:
-                    api_ok = check_ollama_api(row["ip"], row["port"])
-                df.at[idx, "ping"] = latency
-                df.at[idx, "is_active"] = api_ok
-                if "inactive_reason" in df.columns:
-                    df.at[idx, "inactive_reason"] = "" if api_ok else "api unreachable"
-            if "last_check_date" in df.columns:
-                df.at[idx, "last_check_date"] = now
+                    df.at[idx, "ping"] = latency
+                    if update_activity and api_ok is not None:
+                        df.at[idx, "is_active"] = api_ok
+                        if "inactive_reason" in df.columns:
+                            df.at[idx, "inactive_reason"] = (
+                                "" if api_ok else "api unreachable"
+                            )
+
+                if "last_check_date" in df.columns:
+                    df.at[idx, "last_check_date"] = now
+
         write_endpoints(api, df)
 
 def select_server(servers, allow_back=False):
@@ -1793,14 +1857,22 @@ if __name__ == "__main__":
         )
         rain_thread.start()
         display_connecting_box(box_x, box_y, box_w, box_h)
-        ping_thread = threading.Thread(target=update_pings, daemon=True)
+        ping_thread = threading.Thread(
+            target=update_pings,
+            kwargs={
+                "verify_api": False,
+                "update_activity": False,
+                "max_workers": 16,
+            },
+            daemon=True,
+        )
         ping_thread.start()
         ping_thread.join()
         stop_rain.set()
         rain_thread.join()
         clear_screen()
     else:
-        update_pings()
+        update_pings(verify_api=False, update_activity=False, max_workers=16)
 
     if MODE_OVERRIDE_ERROR:
         print(f"{RED}{MODE_OVERRIDE_ERROR}{RESET}")

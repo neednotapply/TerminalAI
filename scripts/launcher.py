@@ -30,6 +30,10 @@ MENU_OPTIONS = [
         "script": "TerminalAI.py",
         "extra_args": ["--mode", "image"],
     },
+    {
+        "label": "Scan for Servers using Shodan",
+        "script": "shodanscan.py",
+    },
 ]
 
 OPTIONS = [opt["label"] for opt in MENU_OPTIONS]
