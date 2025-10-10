@@ -55,7 +55,8 @@ AI_COLOR = "\033[32m"
 # Seconds to keep the "Hack The Planet" splash visible before continuing.
 CONNECTING_SCREEN_DURATION = 0.5
 
-VERBOSE = "--verbose" in sys.argv
+DEBUG_FLAGS = {"--debug", "--verbose"}
+DEBUG_MODE = any(flag in sys.argv for flag in DEBUG_FLAGS)
 
 MODE_ALIASES = {
     "chat": 0,
@@ -113,7 +114,7 @@ def _parse_mode_override():
 _parse_mode_override()
 
 def clear_screen(force=False):
-    if not VERBOSE or force:
+    if not DEBUG_MODE or force:
         os.system("cls" if os.name == "nt" else "clear")
 
 def heat_color(ping):
@@ -722,7 +723,7 @@ def prompt_float(prompt, default, minimum=None, maximum=None):
 
 def choose_mode():
     options = ["Chat with LLM", "Generate Image (InvokeAI)", "Exit"]
-    if VERBOSE:
+    if DEBUG_MODE:
         print(f"{CYAN}Mode Selection:{RESET}")
         for idx, opt in enumerate(options, 1):
             print(f"{GREEN}{idx}. {opt}{RESET}")
@@ -946,7 +947,7 @@ def update_pings(target_api=None):
         write_endpoints(api, df)
 
 def select_server(servers, allow_back=False):
-    if VERBOSE:
+    if DEBUG_MODE:
         print(f"{CYAN}Available Servers:{RESET}")
         for i, s in enumerate(servers, 1):
             ping_val = s.get("ping", float("inf"))
@@ -983,7 +984,7 @@ def select_server(servers, allow_back=False):
             return servers[choice]
 
 def select_model(models):
-    if VERBOSE:
+    if DEBUG_MODE:
         print(f"{CYAN}Available Models:{RESET}")
         for i, model in enumerate(models, 1):
             mark = " *" if has_conversations(model) else ""
@@ -1015,7 +1016,7 @@ def select_invoke_model(models):
         f"{m.name} [{m.base or 'unknown'}]" if isinstance(m.base, str) else m.name
         for m in models
     ]
-    if VERBOSE:
+    if DEBUG_MODE:
         print(f"{CYAN}Available InvokeAI Models:{RESET}")
         for idx, label in enumerate(labels, 1):
             print(f"{GREEN}{idx}. {label}{RESET}")
@@ -1178,7 +1179,7 @@ def select_conversation(model):
         print(f"{CYAN}No previous conversations found.{RESET}")
         return None, [], [], None
 
-    if VERBOSE:
+    if DEBUG_MODE:
         print(f"{CYAN}Conversations:{RESET}")
         print(f"{GREEN}1. Start new conversation{RESET}")
         for i, c in enumerate(convs, 2):
@@ -1226,7 +1227,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             if os.name == "nt":
                 while True:
                     if time.time() - start > IDLE_TIMEOUT:
-                        if not VERBOSE:
+                        if not DEBUG_MODE:
                             rain(persistent=True, use_alt_screen=True)
                         start = time.time()
                     if msvcrt.kbhit():
@@ -1259,7 +1260,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 try:
                     while True:
                         if time.time() - start > IDLE_TIMEOUT:
-                            if not VERBOSE:
+                            if not DEBUG_MODE:
                                 rain(persistent=True, use_alt_screen=True)
                                 tty.setcbreak(fd)
                             start = time.time()
@@ -1771,7 +1772,7 @@ def run_image_mode():
 if __name__ == "__main__":
     selected_api = "ollama"
 
-    if not VERBOSE:
+    if not DEBUG_MODE:
         clear_screen()
         cols, rows = shutil.get_terminal_size(fallback=(80, 24))
         box_w, box_h = 30, 5
@@ -1803,7 +1804,7 @@ if __name__ == "__main__":
 
     if MODE_OVERRIDE_ERROR:
         print(f"{RED}{MODE_OVERRIDE_ERROR}{RESET}")
-    elif MODE_OVERRIDE is not None and VERBOSE:
+    elif MODE_OVERRIDE is not None and DEBUG_MODE:
         label = MODE_LABELS.get(MODE_OVERRIDE)
         if label:
             print(f"{CYAN}Mode override: {label}{RESET}")
