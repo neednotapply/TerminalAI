@@ -118,6 +118,10 @@ class InvokeAIClient:
             ("/api/v1/models", {"model_type": "main"}),
             ("/api/v1/models", {"type": "main"}),
             ("/api/v1/models/main", None),
+            ("/api/v1/model-manager/models", {"model_type": "main"}),
+            ("/api/v1/model-manager/models", None),
+            ("/api/v1/model_manager/models", {"model_type": "main"}),
+            ("/api/v1/model_manager/models", None),
         ]
         last_http_error: Optional[requests.HTTPError] = None
 
@@ -185,6 +189,16 @@ class InvokeAIClient:
                 if isinstance(candidate, list):
                     items = [item for item in candidate if isinstance(item, dict)]
                     break
+                if isinstance(candidate, dict):
+                    nested_items = []
+                    for value in candidate.values():
+                        if isinstance(value, list):
+                            nested_items.extend(
+                                [entry for entry in value if isinstance(entry, dict)]
+                            )
+                    if nested_items:
+                        items = nested_items
+                        break
             if items is None and "results" in payload and isinstance(payload["results"], list):
                 items = [item for item in payload["results"] if isinstance(item, dict)]
 
