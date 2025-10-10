@@ -248,6 +248,14 @@ def _parse_invoke_models(payload):
             models = _parse_invoke_models(nested)
             if models:
                 return models
+            if isinstance(nested, dict):
+                collected = []
+                for value in nested.values():
+                    sub_models = _parse_invoke_models(value)
+                    if sub_models:
+                        collected.extend(sub_models)
+                if collected:
+                    return collected
     return []
 
 
@@ -288,6 +296,10 @@ def check_invoke_api(ip, port, hostname=None):
                 ("/api/v1/models", {"model_type": "main"}),
                 ("/api/v1/models", {"type": "main"}),
                 ("/api/v1/models/main", None),
+                ("/api/v1/model-manager/models", {"model_type": "main"}),
+                ("/api/v1/model-manager/models", None),
+                ("/api/v1/model_manager/models", {"model_type": "main"}),
+                ("/api/v1/model_manager/models", None),
             ]
 
             for path, params in model_candidates:
