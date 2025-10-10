@@ -66,7 +66,7 @@ MODE_ALIASES = {
     "invoke": 1,
     "invokeai": 1,
 }
-MODE_LABELS = {0: "Chat with LLM", 1: "Generate Image (InvokeAI)"}
+MODE_LABELS = {0: "Chat with Ollama", 1: "Generate Images with InvokeAI"}
 MODE_OVERRIDE = None
 MODE_OVERRIDE_ERROR = None
 
@@ -722,7 +722,7 @@ def prompt_float(prompt, default, minimum=None, maximum=None):
 
 
 def choose_mode():
-    options = ["Chat with LLM", "Generate Image (InvokeAI)", "Exit"]
+    options = ["Chat with Ollama", "Generate Images with InvokeAI", "Exit"]
     if DEBUG_MODE:
         print(f"{CYAN}Mode Selection:{RESET}")
         for idx, opt in enumerate(options, 1):
