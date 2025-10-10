@@ -60,7 +60,7 @@ TerminalAI renders image previews directly in the terminal using [chafa.py](http
 Scan for new Ollama and InvokeAI servers and verify existing ones:
 
 ```bash
-python3 scripts/shodanscan.py [--verbose] [--limit N] [--existing-limit N]
+python3 scripts/shodanscan.py [--debug] [--limit N] [--existing-limit N]
 ```
 
 The script requires a Shodan API key. Results are appended to `data/ollama.endpoints.csv` and `data/invoke.endpoints.csv`, enriched with metadata such as hostnames, organisation, ISP, location, and (for InvokeAI) available models. Existing entries are checked for availability and ping time.

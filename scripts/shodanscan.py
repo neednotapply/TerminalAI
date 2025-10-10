@@ -10,6 +10,10 @@ import shodan
 import socket
 import time
 import requests
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
+
+urllib3.disable_warnings(InsecureRequestWarning)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -181,11 +185,32 @@ def ping_time(ip, port):
         return None
 
 
-def check_ollama_api(ip, port):
+def extract_primary_hostname(value):
+    if not value:
+        return None
+    try:
+        if pd.isna(value):  # type: ignore[attr-defined]
+            return None
+    except Exception:
+        pass
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            primary = extract_primary_hostname(item)
+            if primary:
+                return primary
+        return None
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(";") if part.strip()]
+        return parts[0] if parts else None
+    return str(value).strip() or None
+
+
+def check_ollama_api(ip, port, hostname=None):
     """Check that the Ollama API responds on the given host and port."""
     url = f"http://{ip}:{port}/api/tags"
     try:
-        r = requests.get(url, timeout=2)
+        headers = {"Host": hostname} if hostname else None
+        r = requests.get(url, timeout=2, headers=headers)
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -202,40 +227,106 @@ def check_ollama_api(ip, port):
         return False, str(e), []
 
 
-def check_invoke_api(ip, port):
-    """Check that the InvokeAI API responds and gather available models."""
-    base = f"http://{ip}:{port}"
-    version_url = f"{base}/api/v1/app/version"
-    try:
-        r = requests.get(version_url, timeout=3)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        return False, str(e), []
-
-    models_url = f"{base}/api/v2/models"
-    try:
-        params = {"model_type": "main"}
-        r = requests.get(models_url, params=params, timeout=5)
-        r.raise_for_status()
-        payload = r.json()
-        raw_models = payload.get("models") if isinstance(payload, dict) else payload
+def _parse_invoke_models(payload):
+    if isinstance(payload, list):
         models = []
-        if isinstance(raw_models, list):
-            for item in raw_models:
-                if not isinstance(item, dict):
-                    continue
+        for item in payload:
+            if isinstance(item, dict):
                 name = item.get("name") or item.get("id") or item.get("key")
                 if not name:
                     continue
-                base_model = item.get("base") or item.get("base_model")
-                if base_model:
-                    models.append(f"{name} ({base_model})")
-                else:
+                base = item.get("base") or item.get("base_model") or item.get("model_base")
+                models.append(f"{name} ({base})" if base else name)
+            elif isinstance(item, str):
+                name = item.strip()
+                if name:
                     models.append(name)
-        return True, "", models
-    except requests.RequestException as e:
-        # Server responded to health check but failed for models list.
-        return True, f"models fetch failed: {e}", []
+        return models
+    if isinstance(payload, dict):
+        for key in ("models", "items", "data", "results"):
+            nested = payload.get(key)
+            models = _parse_invoke_models(nested)
+            if models:
+                return models
+    return []
+
+
+def check_invoke_api(ip, port, hostname=None):
+    """Check that the InvokeAI API responds and gather available models."""
+
+    last_error = ""
+    targets = []
+
+    if hostname:
+        targets.append((hostname, {"Host": hostname}))
+
+    # Always fall back to the raw IP in case DNS for the hostname no longer
+    # resolves to the scanned address.
+    targets.append((ip, None))
+
+    for scheme in ("http", "https"):
+        verify_tls = scheme != "https"
+
+        for target, headers in targets:
+            base = f"{scheme}://{target}:{port}"
+            version_url = f"{base}/api/v1/app/version"
+
+            try:
+                r = requests.get(
+                    version_url,
+                    timeout=5,
+                    headers=headers,
+                    verify=verify_tls,
+                )
+                r.raise_for_status()
+            except requests.RequestException as e:
+                last_error = str(e)
+                continue
+
+            model_candidates = [
+                ("/api/v2/models", {"model_type": "main"}),
+                ("/api/v1/models", {"model_type": "main"}),
+                ("/api/v1/models", {"type": "main"}),
+                ("/api/v1/models/main", None),
+            ]
+
+            for path, params in model_candidates:
+                url = f"{base}{path}"
+                try:
+                    resp = requests.get(
+                        url,
+                        params=params,
+                        timeout=5,
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    resp.raise_for_status()
+                except requests.HTTPError as exc:
+                    status = (
+                        exc.response.status_code
+                        if exc.response is not None
+                        else None
+                    )
+                    if status == 404:
+                        continue
+                    last_error = str(exc)
+                    break
+                except requests.RequestException as exc:
+                    last_error = str(exc)
+                    break
+
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    payload = None
+
+                models = _parse_invoke_models(payload)
+                if models:
+                    return True, "", models
+            else:
+                return True, "models fetch failed: no compatible endpoint", []
+
+    return False, last_error or "version check failed", []
 
 
 def update_existing(api, df, batch_size, api_type):
@@ -306,10 +397,13 @@ def update_existing(api, df, batch_size, api_type):
                 df.at[idx, "available_models"] = ""
             continue
 
+        hostname = extract_primary_hostname(
+            df.at[idx, "hostnames"] if "hostnames" in df.columns else None
+        )
         if api_type == "invokeai":
-            api_ok, reason, models = check_invoke_api(ip, port)
+            api_ok, reason, models = check_invoke_api(ip, port, hostname=hostname)
         else:
-            api_ok, reason, models = check_ollama_api(ip, port)
+            api_ok, reason, models = check_ollama_api(ip, port, hostname=hostname)
         df.at[idx, "is_active"] = api_ok
         df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
         if "available_models" in df.columns:
@@ -388,10 +482,15 @@ def find_new(api, df, query_info, limit):
             if "available_models" in new_df.columns:
                 new_df.at[idx, "available_models"] = ""
         else:
+            hostname = extract_primary_hostname(row.get("hostnames"))
             if api_type == "invokeai":
-                api_ok, reason, models = check_invoke_api(row["ip"], row["port"])
+                api_ok, reason, models = check_invoke_api(
+                    row["ip"], row["port"], hostname=hostname
+                )
             else:
-                api_ok, reason, models = check_ollama_api(row["ip"], row["port"])
+                api_ok, reason, models = check_ollama_api(
+                    row["ip"], row["port"], hostname=hostname
+                )
             new_df.at[idx, "ping"] = latency
             new_df.at[idx, "is_active"] = api_ok
             new_df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
@@ -414,7 +513,12 @@ def main():
         description="Discover and verify Ollama and InvokeAI endpoints via Shodan"
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable debug logging"
+        "--debug",
+        "-d",
+        "--verbose",
+        dest="debug",
+        action="store_true",
+        help="Enable debug logging",
     )
     parser.add_argument(
         "--limit",
@@ -431,7 +535,7 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=logging.DEBUG if args.debug else logging.INFO,
         format="%(levelname)s:%(message)s",
     )
 

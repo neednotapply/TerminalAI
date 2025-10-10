@@ -31,7 +31,8 @@ MENU_OPTIONS = [
 ]
 
 OPTIONS = [opt["label"] for opt in MENU_OPTIONS]
-VERBOSE = "--verbose" in sys.argv
+DEBUG_FLAGS = {"--debug", "--verbose"}
+DEBUG_MODE = any(flag in sys.argv for flag in DEBUG_FLAGS)
 
 if os.name == "nt":
     import msvcrt
@@ -217,7 +218,7 @@ def run_unix_menu() -> int | None:
 
 def main() -> None:
     args = sys.argv[1:]
-    if VERBOSE:
+    if DEBUG_MODE:
         choice = run_verbose()
     else:
         choice = run_windows_menu() if os.name == "nt" else run_unix_menu()
