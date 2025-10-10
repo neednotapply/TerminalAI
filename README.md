@@ -53,7 +53,7 @@ The client loads servers from `data/ollama.endpoints.csv` (for chat) and `data/i
 
 InvokeAI image generation is available from the main TerminalAI menu. The client automatically discovers active InvokeAI servers from the shared endpoint list, lists the models each host exposes, and walks through prompt configuration (including width/height, steps, CFG scale, scheduler, and optional seed). Generated images are downloaded to `data/images/` along with per-render metadata.
 
-If [chafa](https://hpjansson.org/chafa/) is installed, TerminalAI will render an ANSI preview of the resulting image directly in the terminal before you decide to keep or discard it.
+TerminalAI renders image previews directly in the terminal using [chafa.py](https://github.com/GuardKenzie/chafa.py) (with [Pillow](https://python-pillow.org/)) and will fall back to the [chafa](https://hpjansson.org/chafa/) CLI if the Python bindings are unavailable.
 
 ### Shodan Scan
 

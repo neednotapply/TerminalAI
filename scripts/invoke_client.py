@@ -241,15 +241,18 @@ class InvokeAIClient:
             seed=seed_value,
         )
 
+        batch_payload: Dict[str, Any] = {
+            "graph": graph_info["graph"],
+            "origin": ORIGIN,
+            "destination": DESTINATION,
+            "runs": 1,
+        }
+        if graph_info.get("data") is not None:
+            batch_payload["data"] = graph_info["data"]
+
         body = {
             "prepend": False,
-            "batch": {
-                "graph": graph_info["graph"],
-                "data": graph_info["batch"],
-                "origin": ORIGIN,
-                "destination": DESTINATION,
-                "runs": 1,
-            },
+            "batch": batch_payload,
         }
 
         enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
@@ -402,34 +405,33 @@ class InvokeAIClient:
         seed: int,
     ) -> Dict[str, Any]:
         graph_id = "terminal_sd_graph"
+        clip_skip_layers = model_cfg.get("clip_skip", 0)
+        use_clip_skip = isinstance(clip_skip_layers, int) and clip_skip_layers > 0
+
         nodes: Dict[str, Dict[str, Any]] = {
-            "positive_prompt": {"id": "positive_prompt", "type": "string"},
-            "neg_prompt": {
-                "id": "neg_prompt",
-                "type": "compel",
-                "prompt": negative_prompt or "",
-            },
-            "pos_collect": {"id": "pos_collect", "type": "collect"},
-            "neg_collect": {"id": "neg_collect", "type": "collect"},
-            "seed": {"id": "seed", "type": "integer"},
-            "noise": {
-                "id": "noise",
-                "type": "noise",
-                "use_cpu": False,
-                "width": width,
-                "height": height,
-            },
             "model_loader": {
                 "id": "model_loader",
                 "type": "main_model_loader",
                 "model": model_cfg,
             },
-            "clip_skip": {
-                "id": "clip_skip",
-                "type": "clip_skip",
-                "skipped_layers": model_cfg.get("clip_skip", 0),
+            "positive_conditioning": {
+                "id": "positive_conditioning",
+                "type": "compel",
+                "prompt": prompt,
             },
-            "pos_cond": {"id": "pos_cond", "type": "compel"},
+            "negative_conditioning": {
+                "id": "negative_conditioning",
+                "type": "compel",
+                "prompt": negative_prompt or "",
+            },
+            "noise": {
+                "id": "noise",
+                "type": "noise",
+                "seed": seed,
+                "use_cpu": False,
+                "width": width,
+                "height": height,
+            },
             "denoise": {
                 "id": "denoise",
                 "type": "denoise_latents",
@@ -440,33 +442,69 @@ class InvokeAIClient:
                 "denoising_start": 0.0,
                 "denoising_end": 1.0,
             },
-            "l2i": {"id": "l2i", "type": "l2i", "fp32": False},
+            "latents_to_image": {
+                "id": "latents_to_image",
+                "type": "l2i",
+                "fp32": False,
+            },
         }
 
-        edges = [
-            {"source": {"node_id": "model_loader", "field": "clip"}, "destination": {"node_id": "clip_skip", "field": "clip"}},
-            {"source": {"node_id": "clip_skip", "field": "clip"}, "destination": {"node_id": "pos_cond", "field": "clip"}},
-            {"source": {"node_id": "clip_skip", "field": "clip"}, "destination": {"node_id": "neg_prompt", "field": "clip"}},
-            {"source": {"node_id": "model_loader", "field": "unet"}, "destination": {"node_id": "denoise", "field": "unet"}},
-            {"source": {"node_id": "model_loader", "field": "vae"}, "destination": {"node_id": "l2i", "field": "vae"}},
-            {"source": {"node_id": "positive_prompt", "field": "value"}, "destination": {"node_id": "pos_cond", "field": "prompt"}},
-            {"source": {"node_id": "pos_cond", "field": "conditioning"}, "destination": {"node_id": "pos_collect", "field": "item"}},
-            {"source": {"node_id": "pos_collect", "field": "collection"}, "destination": {"node_id": "denoise", "field": "positive_conditioning"}},
-            {"source": {"node_id": "neg_prompt", "field": "conditioning"}, "destination": {"node_id": "neg_collect", "field": "item"}},
-            {"source": {"node_id": "neg_collect", "field": "collection"}, "destination": {"node_id": "denoise", "field": "negative_conditioning"}},
-            {"source": {"node_id": "seed", "field": "value"}, "destination": {"node_id": "noise", "field": "seed"}},
-            {"source": {"node_id": "noise", "field": "noise"}, "destination": {"node_id": "denoise", "field": "noise"}},
-            {"source": {"node_id": "denoise", "field": "latents"}, "destination": {"node_id": "l2i", "field": "latents"}},
-        ]
+        edges: List[Dict[str, Dict[str, str]]] = []
+        if use_clip_skip:
+            nodes["clip_skip"] = {
+                "id": "clip_skip",
+                "type": "clip_skip",
+                "skipped_layers": clip_skip_layers,
+            }
+            edges.append(
+                {
+                    "source": {"node_id": "model_loader", "field": "clip"},
+                    "destination": {"node_id": "clip_skip", "field": "clip"},
+                }
+            )
+            clip_source = {"node_id": "clip_skip", "field": "clip"}
+        else:
+            clip_source = {"node_id": "model_loader", "field": "clip"}
+
+        edges.extend(
+            [
+                {
+                    "source": clip_source,
+                    "destination": {"node_id": "positive_conditioning", "field": "clip"},
+                },
+                {
+                    "source": clip_source,
+                    "destination": {"node_id": "negative_conditioning", "field": "clip"},
+                },
+                {
+                    "source": {"node_id": "model_loader", "field": "unet"},
+                    "destination": {"node_id": "denoise", "field": "unet"},
+                },
+                {
+                    "source": {"node_id": "model_loader", "field": "vae"},
+                    "destination": {"node_id": "latents_to_image", "field": "vae"},
+                },
+                {
+                    "source": {"node_id": "positive_conditioning", "field": "conditioning"},
+                    "destination": {"node_id": "denoise", "field": "positive_conditioning"},
+                },
+                {
+                    "source": {"node_id": "negative_conditioning", "field": "conditioning"},
+                    "destination": {"node_id": "denoise", "field": "negative_conditioning"},
+                },
+                {
+                    "source": {"node_id": "noise", "field": "noise"},
+                    "destination": {"node_id": "denoise", "field": "noise"},
+                },
+                {
+                    "source": {"node_id": "denoise", "field": "latents"},
+                    "destination": {"node_id": "latents_to_image", "field": "latents"},
+                },
+            ]
+        )
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
-        batch = [
-            [
-                {"node_path": "positive_prompt", "field_name": "value", "items": [prompt]},
-                {"node_path": "seed", "field_name": "value", "items": [seed]},
-            ]
-        ]
-        return {"graph": graph, "batch": batch, "output": "l2i"}
+        return {"graph": graph, "data": None, "output": "latents_to_image"}
 
     def _build_sdxl_graph(
         self,
@@ -482,28 +520,42 @@ class InvokeAIClient:
     ) -> Dict[str, Any]:
         graph_id = "terminal_sdxl_graph"
         nodes: Dict[str, Dict[str, Any]] = {
-            "positive_prompt": {"id": "positive_prompt", "type": "string"},
-            "pos_cond": {"id": "pos_cond", "type": "sdxl_compel_prompt"},
-            "neg_cond": {
-                "id": "neg_cond",
-                "type": "sdxl_compel_prompt",
-                "prompt": negative_prompt or "",
-                "style": negative_prompt or "",
-            },
-            "pos_collect": {"id": "pos_collect", "type": "collect"},
-            "neg_collect": {"id": "neg_collect", "type": "collect"},
-            "seed": {"id": "seed", "type": "integer"},
-            "noise": {
-                "id": "noise",
-                "type": "noise",
-                "use_cpu": False,
-                "width": width,
-                "height": height,
-            },
             "model_loader": {
                 "id": "model_loader",
                 "type": "sdxl_model_loader",
                 "model": model_cfg,
+            },
+            "positive_conditioning": {
+                "id": "positive_conditioning",
+                "type": "sdxl_compel_prompt",
+                "prompt": prompt,
+                "style": prompt,
+                "original_width": width,
+                "original_height": height,
+                "target_width": width,
+                "target_height": height,
+                "crop_top": 0,
+                "crop_left": 0,
+            },
+            "negative_conditioning": {
+                "id": "negative_conditioning",
+                "type": "sdxl_compel_prompt",
+                "prompt": negative_prompt or "",
+                "style": negative_prompt or "",
+                "original_width": width,
+                "original_height": height,
+                "target_width": width,
+                "target_height": height,
+                "crop_top": 0,
+                "crop_left": 0,
+            },
+            "noise": {
+                "id": "noise",
+                "type": "noise",
+                "seed": seed,
+                "use_cpu": False,
+                "width": width,
+                "height": height,
             },
             "denoise": {
                 "id": "denoise",
@@ -515,35 +567,58 @@ class InvokeAIClient:
                 "denoising_start": 0.0,
                 "denoising_end": 1.0,
             },
-            "l2i": {"id": "l2i", "type": "l2i", "fp32": False},
+            "latents_to_image": {
+                "id": "latents_to_image",
+                "type": "l2i",
+                "fp32": False,
+            },
         }
 
         edges = [
-            {"source": {"node_id": "model_loader", "field": "clip"}, "destination": {"node_id": "pos_cond", "field": "clip"}},
-            {"source": {"node_id": "model_loader", "field": "clip"}, "destination": {"node_id": "neg_cond", "field": "clip"}},
-            {"source": {"node_id": "model_loader", "field": "clip2"}, "destination": {"node_id": "pos_cond", "field": "clip2"}},
-            {"source": {"node_id": "model_loader", "field": "clip2"}, "destination": {"node_id": "neg_cond", "field": "clip2"}},
-            {"source": {"node_id": "model_loader", "field": "unet"}, "destination": {"node_id": "denoise", "field": "unet"}},
-            {"source": {"node_id": "model_loader", "field": "vae"}, "destination": {"node_id": "l2i", "field": "vae"}},
-            {"source": {"node_id": "positive_prompt", "field": "value"}, "destination": {"node_id": "pos_cond", "field": "prompt"}},
-            {"source": {"node_id": "positive_prompt", "field": "value"}, "destination": {"node_id": "pos_cond", "field": "style"}},
-            {"source": {"node_id": "pos_cond", "field": "conditioning"}, "destination": {"node_id": "pos_collect", "field": "item"}},
-            {"source": {"node_id": "pos_collect", "field": "collection"}, "destination": {"node_id": "denoise", "field": "positive_conditioning"}},
-            {"source": {"node_id": "neg_cond", "field": "conditioning"}, "destination": {"node_id": "neg_collect", "field": "item"}},
-            {"source": {"node_id": "neg_collect", "field": "collection"}, "destination": {"node_id": "denoise", "field": "negative_conditioning"}},
-            {"source": {"node_id": "seed", "field": "value"}, "destination": {"node_id": "noise", "field": "seed"}},
-            {"source": {"node_id": "noise", "field": "noise"}, "destination": {"node_id": "denoise", "field": "noise"}},
-            {"source": {"node_id": "denoise", "field": "latents"}, "destination": {"node_id": "l2i", "field": "latents"}},
+            {
+                "source": {"node_id": "model_loader", "field": "clip"},
+                "destination": {"node_id": "positive_conditioning", "field": "clip"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "clip"},
+                "destination": {"node_id": "negative_conditioning", "field": "clip"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "clip2"},
+                "destination": {"node_id": "positive_conditioning", "field": "clip2"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "clip2"},
+                "destination": {"node_id": "negative_conditioning", "field": "clip2"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "unet"},
+                "destination": {"node_id": "denoise", "field": "unet"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "vae"},
+                "destination": {"node_id": "latents_to_image", "field": "vae"},
+            },
+            {
+                "source": {"node_id": "positive_conditioning", "field": "conditioning"},
+                "destination": {"node_id": "denoise", "field": "positive_conditioning"},
+            },
+            {
+                "source": {"node_id": "negative_conditioning", "field": "conditioning"},
+                "destination": {"node_id": "denoise", "field": "negative_conditioning"},
+            },
+            {
+                "source": {"node_id": "noise", "field": "noise"},
+                "destination": {"node_id": "denoise", "field": "noise"},
+            },
+            {
+                "source": {"node_id": "denoise", "field": "latents"},
+                "destination": {"node_id": "latents_to_image", "field": "latents"},
+            },
         ]
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
-        batch = [
-            [
-                {"node_path": "positive_prompt", "field_name": "value", "items": [prompt]},
-                {"node_path": "seed", "field_name": "value", "items": [seed]},
-            ]
-        ]
-        return {"graph": graph, "batch": batch, "output": "l2i"}
+        return {"graph": graph, "data": None, "output": "latents_to_image"}
 
 
 __all__ = ["InvokeAIClient", "InvokeAIClientError", "InvokeAIModel"]

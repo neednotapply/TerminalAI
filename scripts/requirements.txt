@@ -2,3 +2,5 @@ requests
 pandas
 shodan
 colorama
+chafa.py
+Pillow
