@@ -196,6 +196,38 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(self.tmpdir.name))
 
+    def test_list_schedulers_prefers_metadata(self):
+        metadata_payload = {
+            "metadata": {
+                "system": {"schedulers": ["euler", "dpmpp_2m"]},
+            }
+        }
+
+        def fake_get(url, *_, **__):
+            if url.endswith("/api/v1/app/metadata"):
+                return DummyResponse(metadata_payload)
+            if url.endswith("/api/v1/metadata/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/metadata"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/config"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/configuration"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/samplers"):
+                return DummyResponse(status_code=404)
+            raise AssertionError(f"Unexpected url: {url}")
+
+        with patch("requests.get", side_effect=fake_get) as mock_get:
+            schedulers = self.client.list_schedulers()
+
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(schedulers, ["euler", "dpmpp_2m"])
+
     def test_list_schedulers_from_openapi(self):
         spec_payload = {
             "openapi": "3.1.0",
@@ -210,10 +242,31 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             },
         }
 
-        with patch("requests.get", return_value=DummyResponse(spec_payload)) as mock_get:
+        def fake_get(url, *_, **__):
+            if url.endswith("/api/v1/app/metadata"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/openapi.json"):
+                return DummyResponse(spec_payload)
+            if url.endswith("/api/v1/metadata/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/metadata"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/config"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/configuration"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/samplers"):
+                return DummyResponse(status_code=404)
+            raise AssertionError(f"Unexpected url: {url}")
+
+        with patch("requests.get", side_effect=fake_get) as mock_get:
             schedulers = self.client.list_schedulers()
 
-        self.assertEqual(mock_get.call_count, 1)
+        self.assertGreaterEqual(mock_get.call_count, 2)
         self.assertIn("ddim", schedulers)
         self.assertIn("dpmpp_2m", schedulers)
         self.assertIn("uni_pc", schedulers)
@@ -221,11 +274,31 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
     def test_list_schedulers_falls_back_to_default(self):
         empty_spec = {"openapi": "3.1.0", "paths": {}}
 
-        with patch("requests.get", return_value=DummyResponse(empty_spec)):
+        def fake_get(url, *_, **__):
+            if url.endswith("/api/v1/app/metadata"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/openapi.json"):
+                return DummyResponse(empty_spec)
+            if url.endswith("/api/v1/metadata/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/metadata"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/config"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/configuration"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/app/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/schedulers"):
+                return DummyResponse(status_code=404)
+            if url.endswith("/api/v1/samplers"):
+                return DummyResponse(status_code=404)
+            raise AssertionError(f"Unexpected url: {url}")
+
+        with patch("requests.get", side_effect=fake_get):
             schedulers = self.client.list_schedulers()
 
-        self.assertIn(DEFAULT_SCHEDULER, schedulers)
-        self.assertGreaterEqual(len(schedulers), 1)
+        self.assertEqual(schedulers, [DEFAULT_SCHEDULER])
 
     def test_list_schedulers_raises_on_network_failure(self):
         with patch("requests.get", side_effect=requests.RequestException("boom")):
@@ -250,6 +323,14 @@ class InvokeQueueHandlingTests(unittest.TestCase):
 
         self.assertIsNone(self.client._extract_queue_item_id_from_location(None))
         self.assertIsNone(self.client._extract_queue_item_id_from_location(""))
+
+    def test_extract_queue_item_id_supports_camel_case_keys(self):
+        payload = {
+            "queueItemId": "abc-123",
+            "nested": {"itemIds": ["should-not-be-picked"]},
+        }
+
+        self.assertEqual(self.client._extract_queue_item_id(payload), "abc-123")
 
     def test_generate_image_uses_session_when_queue_id_missing(self):
         model = InvokeAIModel(
@@ -276,7 +357,10 @@ class InvokeQueueHandlingTests(unittest.TestCase):
             },
         }
 
-        enqueue_response = DummyResponse({"session": session_payload})
+        enqueue_response = DummyResponse(
+            {"session": session_payload},
+            headers={"Location": "http://server/api/v1/queue/default/i/terminal_sdxl_graph"},
+        )
         image_response = DummyResponse(status_code=200, content=b"fake-bytes")
 
         with patch("requests.post", return_value=enqueue_response) as mock_post, patch(

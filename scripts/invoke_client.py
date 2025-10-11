@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-DEFAULT_SCHEDULER = "dpmpp_2m"
+DEFAULT_SCHEDULER = "euler"
 DEFAULT_SCHEDULER_OPTIONS: Tuple[str, ...] = (
     "ddim",
     "ddpm",
@@ -225,6 +225,16 @@ class InvokeAIClient:
         last_error: Optional[BaseException] = None
         for base_url in list(self._base_urls):
             try:
+                installed = self._load_installed_schedulers(base_url)
+            except requests.RequestException as exc:
+                last_error = exc
+                installed = []
+
+            if installed:
+                self._promote_base_url(base_url)
+                return installed
+
+            try:
                 discovered = self._discover_scheduler_options(base_url)
             except requests.RequestException as exc:
                 last_error = exc
@@ -239,7 +249,7 @@ class InvokeAIClient:
                 "Failed to query InvokeAI scheduler metadata"
             ) from last_error
 
-        return sorted(DEFAULT_SCHEDULER_OPTIONS)
+        return [DEFAULT_SCHEDULER]
 
     def _safe_json(self, response: requests.Response) -> Any:
         try:
@@ -368,6 +378,138 @@ class InvokeAIClient:
             return []
 
         return sorted(results)
+
+    def _load_installed_schedulers(self, base_url: str) -> List[str]:
+        """Attempt to retrieve the schedulers explicitly installed on the server."""
+
+        endpoints = (
+            "/api/v1/app/metadata",
+            "/api/v1/metadata/schedulers",
+            "/api/v1/metadata",
+            "/api/v1/app/config",
+            "/api/v1/app/configuration",
+            "/api/v1/app/schedulers",
+            "/api/v1/schedulers",
+            "/api/v1/samplers",
+        )
+
+        seen: set[str] = set()
+        ordered: List[str] = []
+        last_error: Optional[requests.RequestException] = None
+
+        for path in endpoints:
+            url = f"{base_url}{path}"
+            try:
+                resp = requests.get(url, timeout=5)
+            except requests.RequestException as exc:
+                last_error = exc
+                continue
+
+            if resp.status_code and resp.status_code >= 400:
+                continue
+
+            payload = self._safe_json(resp)
+            candidates = self._extract_installed_scheduler_names(payload)
+            for name in candidates:
+                if name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+
+            if ordered:
+                return ordered
+
+        if last_error is not None:
+            raise last_error
+
+        return []
+
+    def _extract_installed_scheduler_names(self, payload: Any) -> List[str]:
+        """Extract scheduler names from various InvokeAI metadata payloads."""
+
+        if payload is None:
+            return []
+
+        candidates: List[str] = []
+
+        def contains_hint(node: Any) -> bool:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if isinstance(key, str):
+                        lowered = key.lower()
+                        if "scheduler" in lowered or "sampler" in lowered:
+                            return True
+                    if contains_hint(value):
+                        return True
+            elif isinstance(node, list):
+                for item in node:
+                    if contains_hint(item):
+                        return True
+            return False
+
+        def add_name(value: Any) -> None:
+            if isinstance(value, str):
+                name = value.strip()
+                if name:
+                    candidates.append(name)
+
+        def handle_collection(collection: Iterable[Any]) -> None:
+            values: List[str] = []
+            for item in collection:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        values.append(text)
+                elif isinstance(item, dict):
+                    for key in ("name", "id", "scheduler", "value", "label"):
+                        add_name(item.get(key))
+                else:
+                    continue
+            if values:
+                candidates.extend(values)
+
+        if isinstance(payload, list):
+            handle_collection(payload)
+        elif isinstance(payload, dict):
+            matched = False
+            for key in (
+                "schedulers",
+                "scheduler_names",
+                "scheduler_list",
+                "available_schedulers",
+                "installed_schedulers",
+                "samplers",
+                "data",
+                "items",
+                "result",
+            ):
+                if key in payload:
+                    matched = True
+                    names = self._extract_installed_scheduler_names(payload[key])
+                    candidates.extend(names)
+            if not candidates:
+                details = payload.get("metadata")
+                if isinstance(details, dict):
+                    candidates.extend(self._extract_installed_scheduler_names(details))
+                    matched = True
+            if not candidates and not matched:
+                for key, value in payload.items():
+                    if not isinstance(value, (dict, list)):
+                        continue
+                    key_hint = isinstance(key, str) and (
+                        "scheduler" in key.lower() or "sampler" in key.lower()
+                    )
+                    if key_hint or contains_hint(value):
+                        candidates.extend(self._extract_installed_scheduler_names(value))
+
+        filtered: List[str] = []
+        seen: set[str] = set()
+        for name in candidates:
+            normalized = name.strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                filtered.append(normalized)
+
+        return filtered
 
     def _collect_scheduler_enums(self, node: Any, hinted: bool, results: set[str]) -> None:
         if isinstance(node, dict):
@@ -540,6 +682,9 @@ class InvokeAIClient:
         if item_id is None:
             location_header = getattr(resp, "headers", {}).get("Location") if hasattr(resp, "headers") else None
             item_id = self._extract_queue_item_id_from_location(location_header)
+            graph_id = graph_info["graph"].get("id") if isinstance(graph_info.get("graph"), dict) else None
+            if graph_id and item_id == graph_id:
+                item_id = None
 
         session: Optional[Dict[str, Any]] = None
         if item_id is not None:
@@ -807,35 +952,60 @@ class InvokeAIClient:
         if payload is None:
             return None
 
-        queue_keys = {
-            "item_id",
-            "item_ids",
+        # Prioritize explicit queue identifiers before considering generic ids.
+        queue_keys: List[str] = [
             "queue_item_id",
             "queue_item_ids",
-        }
+            "item_id",
+            "item_ids",
+        ]
         if allow_generic_id:
-            queue_keys.update({"id", "ids"})
+            queue_keys.extend(["id", "ids"])
+
+        queue_keys = [self._canonicalize_queue_key(key) for key in queue_keys]
 
         to_visit: List[Any] = [payload]
         while to_visit:
             current = to_visit.pop(0)
             if isinstance(current, dict):
                 is_session_like = self._looks_like_session_payload(current)
-                for key, value in current.items():
-                    if key in queue_keys:
-                        if is_session_like and key in {"id", "ids"}:
+                keys_by_priority: List[Tuple[str, Any]] = []
+                for actual_key, value in current.items():
+                    canonical_key = self._canonicalize_queue_key(actual_key)
+                    if canonical_key not in queue_keys:
+                        continue
+                    keys_by_priority.append((canonical_key, value))
+
+                # Preserve preference ordering defined in queue_keys.
+                for canonical_key in queue_keys:
+                    for matched_key, value in keys_by_priority:
+                        if matched_key != canonical_key:
                             continue
+                        if canonical_key in {"id", "ids"}:
+                            if is_session_like:
+                                continue
+                            # Avoid mistaking graph or node identifiers for queue ids.
+                            if {"nodes", "edges"} & current.keys():
+                                continue
+                            if "type" in current and "status" not in current:
+                                continue
                         normalized = self._normalize_queue_item_id(
                             value, allow_generic_id=allow_generic_id
                         )
                         if normalized is not None:
                             return normalized
+                        break
+
+                for value in current.values():
                     if isinstance(value, (dict, list)):
                         to_visit.append(value)
             elif isinstance(current, list):
                 to_visit.extend(item for item in current if isinstance(item, (dict, list)))
 
         return None
+
+    def _canonicalize_queue_key(self, key: str) -> str:
+        return "".join(ch for ch in key.lower() if ch.isalnum())
 
     def _normalize_queue_item_id(
         self, value: Any, *, allow_generic_id: bool = True
