@@ -1,12 +1,13 @@
 """Helper utilities for interacting with InvokeAI servers."""
 from __future__ import annotations
 
+import datetime
 import json
 import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
@@ -628,6 +629,58 @@ class InvokeAIClient:
 
         return models
 
+    def submit_image_generation(
+        self,
+        model: InvokeAIModel,
+        prompt: str,
+        negative_prompt: str = "",
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        steps: int = DEFAULT_STEPS,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        scheduler: str = DEFAULT_SCHEDULER,
+        seed: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Submit a generation request and return queue identifiers."""
+
+        payload, graph_info, seed_value = self._build_enqueue_payload(
+            model=model,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            scheduler=scheduler,
+            seed=seed,
+        )
+
+        enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
+        resp = requests.post(enqueue_url, json=payload, timeout=15)
+        resp.raise_for_status()
+
+        data = self._safe_json(resp)
+        item_id = self._extract_queue_item_id(data)
+        if item_id is None:
+            location_header = getattr(resp, "headers", {}).get("Location") if hasattr(resp, "headers") else None
+            item_id = self._extract_queue_item_id_from_location(location_header)
+            graph_id = graph_info["graph"].get("id") if isinstance(graph_info.get("graph"), dict) else None
+            if graph_id and item_id == graph_id:
+                item_id = None
+
+        batch_info = data.get("batch") if isinstance(data, dict) else None
+        batch_id = None
+        if isinstance(batch_info, dict):
+            batch_id = batch_info.get("batch_id") or batch_info.get("id")
+
+        return {
+            "queue_item_id": item_id,
+            "batch_id": batch_id,
+            "seed": seed_value,
+            "graph": graph_info,
+            "response": data,
+        }
+
     def generate_image(
         self,
         model: InvokeAIModel,
@@ -643,6 +696,290 @@ class InvokeAIClient:
     ) -> Dict[str, Any]:
         """Generate an image and return metadata about the result."""
 
+        payload, graph_info, seed_value = self._build_enqueue_payload(
+            model=model,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            scheduler=scheduler,
+            seed=seed,
+        )
+
+        enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
+        enqueue_started = time.time()
+        resp = requests.post(enqueue_url, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = self._safe_json(resp)
+
+        item_id = self._extract_queue_item_id(data)
+        if item_id is None:
+            location_header = getattr(resp, "headers", {}).get("Location") if hasattr(resp, "headers") else None
+            item_id = self._extract_queue_item_id_from_location(location_header)
+            graph_id = graph_info["graph"].get("id") if isinstance(graph_info.get("graph"), dict) else None
+            if graph_id and item_id == graph_id:
+                item_id = None
+
+        batch_info = data.get("batch") if isinstance(data, dict) else None
+        batch_id = None
+        if isinstance(batch_info, dict):
+            batch_id = batch_info.get("batch_id") or batch_info.get("id")
+
+        session: Optional[Dict[str, Any]] = None
+        batch_session_info: Optional[Tuple[Optional[str], Dict[str, Any]]] = None
+        if item_id is not None:
+            session = self._poll_queue(item_id=item_id, timeout=timeout)
+        else:
+            session = self._extract_session_from_enqueue_response(data)
+            if session is None:
+                batch_session_info = self._poll_queue_by_batch(
+                    batch_id=batch_id,
+                    timeout=timeout,
+                    enqueue_started=enqueue_started,
+                )
+                if batch_session_info is not None:
+                    item_id, session = batch_session_info
+            if session is None:
+                fallback_image = self._wait_for_board_image(
+                    board_name="Auto",
+                    enqueue_started=enqueue_started,
+                    timeout=timeout,
+                )
+                if fallback_image is not None:
+                    return self._build_result_from_board_image(
+                        image_info=fallback_image,
+                        prompt=prompt,
+                        negative_prompt=negative_prompt,
+                        seed_value=seed_value,
+                        width=width,
+                        height=height,
+                        steps=steps,
+                        cfg_scale=cfg_scale,
+                        scheduler=scheduler,
+                        model=model,
+                    )
+                raise InvokeAIClientError("InvokeAI did not return a queue item id")
+            if item_id is None and batch_session_info is not None:
+                item_id = batch_session_info[0]
+            if item_id is None:
+                item_id = self._extract_queue_item_id(session, allow_generic_id=False)
+
+        output_node = graph_info["output"]
+        result = self._extract_image_result(session, output_node)
+        image_info = result.get("image") or result.get("images")
+        image_meta: Optional[Dict[str, Any]] = None
+        if isinstance(image_info, list) and image_info:
+            image_meta = image_info[0]
+        elif isinstance(image_info, dict):
+            image_meta = image_info
+        if not image_meta:
+            raise InvokeAIClientError("InvokeAI response did not include image metadata")
+        image_name = image_meta.get("image_name")
+        if not image_name:
+            raise InvokeAIClientError("InvokeAI response missing image name")
+
+        return self._store_image_result(
+            image_name=image_name,
+            image_meta=image_meta,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            seed_value=seed_value,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            scheduler=scheduler,
+            model=model,
+            item_id=item_id,
+            session_id=session.get("id") if isinstance(session, dict) else None,
+        )
+
+    def list_boards(self) -> List[Dict[str, Any]]:
+        """Return the boards available on the InvokeAI server."""
+
+        boards_url = f"{self.base_url}/api/v1/boards/"
+        try:
+            resp = requests.get(boards_url, params={"all": "true"}, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise InvokeAIClientError(f"Failed to retrieve boards: {exc}") from exc
+
+        payload = self._safe_json(resp)
+        if isinstance(payload, dict):
+            items = payload.get("items")
+            candidates = items if isinstance(items, list) else []
+        elif isinstance(payload, list):
+            candidates = payload
+        else:
+            candidates = []
+
+        boards: List[Dict[str, Any]] = []
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                continue
+            board_id = entry.get("board_id") or entry.get("id")
+            name = entry.get("board_name") or entry.get("name")
+            if not isinstance(board_id, str) or not board_id.strip():
+                continue
+            display_name = name if isinstance(name, str) and name.strip() else board_id
+            info: Dict[str, Any] = {
+                "id": board_id,
+                "name": display_name,
+            }
+            count = entry.get("image_count") or entry.get("count")
+            if isinstance(count, (int, float)):
+                info["count"] = int(count)
+            boards.append(info)
+
+        boards.sort(key=lambda value: value.get("name", "").lower())
+        return boards
+
+    def list_board_images(
+        self,
+        board_id: str,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return the newest images for a board."""
+
+        if not board_id:
+            return []
+
+        params: Dict[str, Any] = {
+            "board_id": board_id,
+            "limit": max(1, int(limit)),
+            "offset": max(0, int(offset)),
+            "order_dir": "DESC",
+            "starred_first": "false",
+        }
+
+        images_url = f"{self.base_url}/api/v1/images/"
+        try:
+            resp = requests.get(images_url, params=params, timeout=15)
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise InvokeAIClientError(f"Failed to retrieve board images: {exc}") from exc
+
+        payload = self._safe_json(resp)
+        if isinstance(payload, dict):
+            items = payload.get("items")
+            entries = items if isinstance(items, list) else []
+        elif isinstance(payload, list):
+            entries = payload
+        else:
+            entries = []
+
+        return [entry for entry in entries if isinstance(entry, dict)]
+
+    def retrieve_board_image(
+        self,
+        *,
+        image_info: Dict[str, Any],
+        board_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Download an image listed on a board for preview."""
+
+        if not isinstance(image_info, dict):
+            raise InvokeAIClientError("Board image entry must be a dictionary")
+
+        image_name = image_info.get("image_name")
+        if not isinstance(image_name, str) or not image_name.strip():
+            raise InvokeAIClientError("Board image metadata missing image name")
+
+        raw_metadata = image_info.get("metadata") if isinstance(image_info.get("metadata"), dict) else None
+        metadata_payload = raw_metadata or self._fetch_image_metadata(image_name) or {}
+
+        prompt = self._coerce_str(
+            metadata_payload.get("positive_prompt"),
+            fallback=self._coerce_str(metadata_payload.get("prompt"), default=""),
+            default="",
+        )
+        if not prompt:
+            prompt = self._coerce_str(image_info.get("prompt"), default="")
+
+        negative_prompt = self._coerce_str(
+            metadata_payload.get("negative_prompt"),
+            fallback=self._coerce_str(image_info.get("negative_prompt"), default=""),
+            default="",
+        )
+
+        width = self._coerce_int(
+            self._extract_value(metadata_payload, image_info, "width"),
+            default=DEFAULT_WIDTH,
+        )
+        height = self._coerce_int(
+            self._extract_value(metadata_payload, image_info, "height"),
+            default=DEFAULT_HEIGHT,
+        )
+        steps = self._coerce_int(
+            self._extract_value(metadata_payload, image_info, "steps"),
+            default=DEFAULT_STEPS,
+        )
+        cfg_scale = self._coerce_float(
+            self._extract_value(metadata_payload, image_info, "cfg_scale"),
+            default=DEFAULT_CFG_SCALE,
+        )
+        scheduler = self._coerce_str(
+            self._extract_value(metadata_payload, image_info, "scheduler")
+            or self._extract_value(metadata_payload, image_info, "sampler"),
+            default=DEFAULT_SCHEDULER,
+        )
+        seed_value = self._coerce_int(
+            self._extract_value(metadata_payload, image_info, "seed"),
+            default=random.randint(0, 2**31 - 1),
+        )
+
+        model_info = self._extract_model(metadata_payload, image_info)
+        model = InvokeAIModel(
+            name=model_info.get("name", "(unknown)"),
+            base=model_info.get("base", "unknown"),
+            key=model_info.get("key"),
+            raw=model_info.get("raw", {}),
+        )
+
+        image_meta = dict(image_info)
+        if board_name:
+            image_meta.setdefault("board", board_name)
+        if metadata_payload:
+            image_meta.setdefault("metadata", metadata_payload)
+
+        return self._store_image_result(
+            image_name=image_name,
+            image_meta=image_meta,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            seed_value=seed_value,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            scheduler=scheduler,
+            model=model,
+            item_id=None,
+            session_id=None,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _build_enqueue_payload(
+        self,
+        *,
+        model: InvokeAIModel,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        scheduler: str,
+        seed: Optional[int],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
         if not prompt.strip():
             raise InvokeAIClientError("Prompt must not be empty")
 
@@ -673,89 +1010,117 @@ class InvokeAIClient:
             "batch": batch_payload,
         }
 
-        enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
-        resp = requests.post(enqueue_url, json=body, timeout=15)
-        resp.raise_for_status()
-        data = self._safe_json(resp)
+        return body, graph_info, seed_value
 
-        item_id = self._extract_queue_item_id(data)
-        if item_id is None:
-            location_header = getattr(resp, "headers", {}).get("Location") if hasattr(resp, "headers") else None
-            item_id = self._extract_queue_item_id_from_location(location_header)
-            graph_id = graph_info["graph"].get("id") if isinstance(graph_info.get("graph"), dict) else None
-            if graph_id and item_id == graph_id:
-                item_id = None
+    def _coerce_str(
+        self,
+        value: Any,
+        *,
+        fallback: Optional[str] = None,
+        default: str = "",
+    ) -> str:
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+        if isinstance(fallback, str):
+            text = fallback.strip()
+            if text:
+                return text
+        return default
 
-        session: Optional[Dict[str, Any]] = None
-        if item_id is not None:
-            session = self._poll_queue(item_id=item_id, timeout=timeout)
+    def _coerce_int(self, value: Any, *, default: int) -> int:
+        try:
+            if isinstance(value, bool):
+                raise TypeError
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_float(self, value: Any, *, default: float) -> float:
+        try:
+            if isinstance(value, bool):
+                raise TypeError
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _extract_value(
+        self,
+        metadata_payload: Optional[Dict[str, Any]],
+        image_info: Optional[Dict[str, Any]],
+        key: str,
+    ) -> Any:
+        if isinstance(metadata_payload, dict) and key in metadata_payload:
+            return metadata_payload.get(key)
+        if isinstance(image_info, dict) and key in image_info:
+            return image_info.get(key)
+        if isinstance(image_info, dict):
+            nested = image_info.get("metadata")
+            if isinstance(nested, dict) and key in nested:
+                return nested.get(key)
+        return None
+
+    def _extract_model(
+        self,
+        metadata_payload: Optional[Dict[str, Any]],
+        image_info: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        candidate: Any = None
+        if isinstance(metadata_payload, dict):
+            candidate = metadata_payload.get("model")
+            if candidate is None:
+                candidate = metadata_payload.get("model_settings")
+        if candidate is None and isinstance(image_info, dict):
+            candidate = image_info.get("model")
+
+        raw: Dict[str, Any] = {}
+        name = "(unknown)"
+        base = "unknown"
+        key = None
+
+        if isinstance(candidate, dict):
+            raw = dict(candidate)
+            name = self._coerce_str(
+                candidate.get("name")
+                or candidate.get("model_name")
+                or candidate.get("model"),
+                default="(unknown)",
+            )
+            base = self._coerce_str(
+                candidate.get("base")
+                or candidate.get("base_model")
+                or candidate.get("type"),
+                default="unknown",
+            )
+            key_value = candidate.get("key")
+            key = key_value if isinstance(key_value, str) else None
+        elif isinstance(candidate, str):
+            name = self._coerce_str(candidate, default="(unknown)")
+            meta_base = None
+            if isinstance(metadata_payload, dict):
+                meta_base = metadata_payload.get("base_model")
+            base = self._coerce_str(meta_base, default="unknown")
         else:
-            session = self._extract_session_from_enqueue_response(data)
-            if session is None:
-                raise InvokeAIClientError("InvokeAI did not return a queue item id")
-            item_id = self._extract_queue_item_id(session, allow_generic_id=False)
-
-        output_node = graph_info["output"]
-        result = self._extract_image_result(session, output_node)
-        image_info = result.get("image") or result.get("images")
-        image_meta: Optional[Dict[str, Any]] = None
-        if isinstance(image_info, list) and image_info:
-            image_meta = image_info[0]
-        elif isinstance(image_info, dict):
-            image_meta = image_info
-        if not image_meta:
-            raise InvokeAIClientError("InvokeAI response did not include image metadata")
-        image_name = image_meta.get("image_name")
-        if not image_name:
-            raise InvokeAIClientError("InvokeAI response missing image name")
-
-        image_url = f"{self.base_url}/api/v1/images/i/{image_name}/full"
-        image_resp = requests.get(image_url, timeout=30)
-        image_resp.raise_for_status()
-
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        safe_name = image_name.replace("/", "_")
-        out_path = self.images_dir / f"{timestamp}_{safe_name}"
-        with out_path.open("wb") as f:
-            f.write(image_resp.content)
-
-        meta_path = out_path.with_suffix(".json")
-        metadata = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "seed": seed_value,
-            "width": width,
-            "height": height,
-            "steps": steps,
-            "cfg_scale": cfg_scale,
-            "scheduler": scheduler,
-            "model": {
-                "name": model.name,
-                "base": model.base,
-                "key": model.key,
-            },
-            "server": {
-                "ip": self.ip,
-                "port": self.port,
-                "nickname": self.nickname,
-            },
-            "queue_item": item_id,
-            "session_id": session.get("id"),
-            "image": image_meta,
-        }
-        with meta_path.open("w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+            if isinstance(metadata_payload, dict):
+                name = self._coerce_str(
+                    metadata_payload.get("model_name")
+                    or metadata_payload.get("model"),
+                    default="(unknown)",
+                )
+                base = self._coerce_str(
+                    metadata_payload.get("base_model")
+                    or metadata_payload.get("model_base"),
+                    default="unknown",
+                )
 
         return {
-            "path": out_path,
-            "metadata_path": meta_path,
-            "image_name": image_name,
-            "metadata": metadata,
+            "name": name,
+            "base": (base or "unknown").lower(),
+            "key": key,
+            "raw": raw,
         }
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
     def _poll_queue(self, item_id: Any, timeout: float) -> Dict[str, Any]:
         item_id_str = str(item_id).strip()
         if not item_id_str:
@@ -787,6 +1152,359 @@ class InvokeAIClient:
                 message = payload.get("error_message") or payload.get("error_type") or status
                 raise InvokeAIClientError(f"Queue item {item_id} {status}: {message}")
             time.sleep(2)
+
+    def _poll_queue_by_batch(
+        self,
+        *,
+        batch_id: Optional[str],
+        timeout: float,
+        enqueue_started: float,
+    ) -> Optional[Tuple[Optional[str], Dict[str, Any]]]:
+        if not batch_id:
+            return None
+
+        status_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/b/{batch_id}/status"
+        deadline = enqueue_started + timeout
+        last_error: Optional[InvokeAIClientError] = None
+
+        while time.time() < deadline:
+            try:
+                resp = requests.get(status_url, timeout=10)
+                if resp.status_code == 404:
+                    break
+                resp.raise_for_status()
+            except requests.RequestException:
+                time.sleep(2)
+                continue
+
+            payload = self._safe_json(resp)
+            if not isinstance(payload, dict):
+                time.sleep(2)
+                continue
+
+            failed_count = payload.get("failed")
+            if isinstance(failed_count, int) and failed_count > 0:
+                message = payload.get("error_message") or "batch failed"
+                last_error = InvokeAIClientError(
+                    f"Queue batch {batch_id} failed: {message}"
+                )
+                break
+
+            total = payload.get("total")
+            completed = payload.get("completed")
+            if (
+                isinstance(total, int)
+                and total > 0
+                and isinstance(completed, int)
+                and completed >= total
+            ):
+                for item in self._list_queue_items_for_batch(batch_id):
+                    if not isinstance(item, dict):
+                        continue
+                    session = item.get("session") if isinstance(item.get("session"), dict) else None
+                    status = item.get("status")
+                    if status != "completed" or session is None:
+                        continue
+                    queue_item = item.get("item_id")
+                    queue_item_str = str(queue_item).strip() if queue_item is not None else None
+                    return queue_item_str, session
+                break
+
+            time.sleep(2)
+
+        if last_error is not None:
+            raise last_error
+        return None
+
+    def _list_queue_items_for_batch(self, batch_id: str) -> List[Dict[str, Any]]:
+        list_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/list_all"
+        attempts = [{"destination": DESTINATION}, {}]
+        for params in attempts:
+            try:
+                resp = requests.get(list_url, params=params or None, timeout=15)
+                if resp.status_code == 404:
+                    continue
+                resp.raise_for_status()
+            except requests.RequestException:
+                continue
+
+            payload = self._safe_json(resp)
+            items: List[Dict[str, Any]] = []
+            if isinstance(payload, list):
+                items = [entry for entry in payload if isinstance(entry, dict)]
+            elif isinstance(payload, dict):
+                maybe_items = payload.get("items")
+                if isinstance(maybe_items, list):
+                    items = [entry for entry in maybe_items if isinstance(entry, dict)]
+
+            matches: List[Dict[str, Any]] = []
+            for entry in items:
+                entry_batch = entry.get("batch_id")
+                if entry_batch is None:
+                    continue
+                if str(entry_batch) != str(batch_id):
+                    continue
+                matches.append(entry)
+
+            if matches:
+                return matches
+
+        return []
+
+    def _wait_for_board_image(
+        self,
+        *,
+        board_name: str,
+        enqueue_started: float,
+        timeout: float,
+    ) -> Optional[Dict[str, Any]]:
+        board_id = self._fetch_board_id(board_name)
+
+        fetchers: List[Callable[[], Optional[Dict[str, Any]]]] = []
+        if board_id:
+            def fetch_board() -> Optional[Dict[str, Any]]:
+                return self._fetch_latest_board_image(board_id)
+
+            fetchers.append(fetch_board)
+
+        fetchers.append(self._fetch_latest_global_image)
+
+        deadline = enqueue_started + timeout
+        threshold = enqueue_started - 5
+        while time.time() < deadline:
+            for fetcher in fetchers:
+                try:
+                    image_info = fetcher()
+                except Exception:
+                    image_info = None
+                if not isinstance(image_info, dict):
+                    continue
+
+                created_value = (
+                    image_info.get("created_at")
+                    or image_info.get("updated_at")
+                    or image_info.get("timestamp")
+                )
+                created_at = self._parse_iso_timestamp(created_value)
+                if created_at is None or created_at >= threshold:
+                    return image_info
+
+            time.sleep(2)
+
+        return None
+
+    def _fetch_board_id(self, board_name: str) -> Optional[str]:
+        name_norm = board_name.strip().lower()
+        if not name_norm:
+            return None
+
+        boards_url = f"{self.base_url}/api/v1/boards/"
+        try:
+            resp = requests.get(boards_url, params={"all": "true"}, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException:
+            return None
+
+        payload = self._safe_json(resp)
+        candidates: List[Dict[str, Any]] = []
+        if isinstance(payload, list):
+            candidates = [entry for entry in payload if isinstance(entry, dict)]
+        elif isinstance(payload, dict):
+            items = payload.get("items")
+            if isinstance(items, list):
+                candidates = [entry for entry in items if isinstance(entry, dict)]
+
+        for entry in candidates:
+            label = entry.get("board_name") or entry.get("name")
+            if isinstance(label, str) and label.strip().lower() == name_norm:
+                board_id = entry.get("board_id") or entry.get("id")
+                if isinstance(board_id, str) and board_id.strip():
+                    return board_id
+        return None
+
+    def _fetch_latest_board_image(self, board_id: str) -> Optional[Dict[str, Any]]:
+        return self._fetch_latest_image({"board_id": board_id})
+
+    def _fetch_latest_global_image(self) -> Optional[Dict[str, Any]]:
+        return self._fetch_latest_image(None)
+
+    def _fetch_latest_image(
+        self, extra_params: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        images_url = f"{self.base_url}/api/v1/images/"
+        params: Dict[str, Any] = {
+            "limit": 1,
+            "offset": 0,
+            "order_dir": "DESC",
+            "starred_first": "false",
+        }
+        if extra_params:
+            params.update(extra_params)
+        try:
+            resp = requests.get(images_url, params=params, timeout=15)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+        except requests.RequestException:
+            return None
+
+        payload = self._safe_json(resp)
+        items: List[Dict[str, Any]] = []
+        if isinstance(payload, dict):
+            potential = payload.get("items")
+            if isinstance(potential, list):
+                items = [entry for entry in potential if isinstance(entry, dict)]
+        elif isinstance(payload, list):
+            items = [entry for entry in payload if isinstance(entry, dict)]
+
+        return items[0] if items else None
+
+    def _parse_iso_timestamp(self, value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, datetime.datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.datetime.fromisoformat(text)
+            except ValueError:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        return None
+
+    def _fetch_image_metadata(self, image_name: str) -> Optional[Dict[str, Any]]:
+        metadata_url = f"{self.base_url}/api/v1/images/i/{image_name}/metadata"
+        try:
+            resp = requests.get(metadata_url, timeout=15)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+        except requests.RequestException:
+            return None
+
+        payload = self._safe_json(resp)
+        return payload if isinstance(payload, dict) else None
+
+    def _normalize_metadata_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: self._normalize_metadata_value(val) for key, val in value.items()}
+        if isinstance(value, list):
+            return [self._normalize_metadata_value(item) for item in value]
+        if isinstance(value, datetime.datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+            return dt.isoformat()
+        return value
+
+    def _store_image_result(
+        self,
+        *,
+        image_name: str,
+        image_meta: Dict[str, Any],
+        prompt: str,
+        negative_prompt: str,
+        seed_value: int,
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        scheduler: str,
+        model: InvokeAIModel,
+        item_id: Optional[str],
+        session_id: Optional[str],
+    ) -> Dict[str, Any]:
+        image_url = f"{self.base_url}/api/v1/images/i/{image_name}/full"
+        image_resp = requests.get(image_url, timeout=30)
+        image_resp.raise_for_status()
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        safe_name = image_name.replace("/", "_")
+        out_path = self.images_dir / f"{timestamp}_{safe_name}"
+        with out_path.open("wb") as f:
+            f.write(image_resp.content)
+
+        meta_path = out_path.with_suffix(".json")
+        metadata = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "seed": seed_value,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "scheduler": scheduler,
+            "model": {
+                "name": model.name,
+                "base": model.base,
+                "key": model.key,
+            },
+            "server": {
+                "ip": self.ip,
+                "port": self.port,
+                "nickname": self.nickname,
+            },
+            "queue_item": item_id,
+            "session_id": session_id,
+            "image": self._normalize_metadata_value(image_meta),
+        }
+        with meta_path.open("w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+        return {
+            "path": out_path,
+            "metadata_path": meta_path,
+            "image_name": image_name,
+            "metadata": metadata,
+        }
+
+    def _build_result_from_board_image(
+        self,
+        *,
+        image_info: Dict[str, Any],
+        prompt: str,
+        negative_prompt: str,
+        seed_value: int,
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        scheduler: str,
+        model: InvokeAIModel,
+    ) -> Dict[str, Any]:
+        image_name = image_info.get("image_name") if isinstance(image_info, dict) else None
+        if not isinstance(image_name, str) or not image_name.strip():
+            raise InvokeAIClientError("Latest board image did not include an image name")
+
+        image_meta = dict(image_info)
+        metadata_payload = self._fetch_image_metadata(image_name)
+        if metadata_payload is not None:
+            image_meta.setdefault("metadata", metadata_payload)
+
+        raw_session_id = image_info.get("session_id")
+        session_id = raw_session_id if isinstance(raw_session_id, str) else None
+
+        return self._store_image_result(
+            image_name=image_name,
+            image_meta=image_meta,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            seed_value=seed_value,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            scheduler=scheduler,
+            model=model,
+            item_id=None,
+            session_id=session_id,
+        )
 
     def _extract_image_result(self, session: Dict[str, Any], output_node: str) -> Dict[str, Any]:
         results = session.get("results")

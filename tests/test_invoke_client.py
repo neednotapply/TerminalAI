@@ -1,6 +1,7 @@
 import importlib
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -386,6 +387,82 @@ class InvokeQueueHandlingTests(unittest.TestCase):
         self.assertEqual(result["metadata"]["session_id"], "session-abc")
         self.assertTrue(result["path"].exists())
         self.assertEqual(result["path"].read_bytes(), b"fake-bytes")
+
+    def test_poll_queue_by_batch_returns_session_and_item_id(self):
+        session_payload = {"id": "session-123", "results": {}}
+        status_payload = {"total": 1, "completed": 1}
+        queue_payload = [
+            {
+                "item_id": 7,
+                "status": "completed",
+                "batch_id": "batch-xyz",
+                "session": session_payload,
+            }
+        ]
+
+        def fake_get(url, *_, **__):
+            if url.endswith("/status"):
+                return DummyResponse(status_payload)
+            if url.endswith("/list_all"):
+                return DummyResponse(queue_payload)
+            raise AssertionError(f"Unexpected url: {url}")
+
+        with patch("requests.get", side_effect=fake_get):
+            result = self.client._poll_queue_by_batch(
+                batch_id="batch-xyz",
+                timeout=5,
+                enqueue_started=time.time(),
+            )
+
+        self.assertIsNotNone(result)
+        queue_item_id, session = result
+        self.assertEqual(queue_item_id, "7")
+        self.assertEqual(session, session_payload)
+
+
+class InvokeSubmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(self.tmpdir.name))
+
+    def test_submit_image_generation_returns_identifiers(self):
+        model = InvokeAIModel(name="demo", base="sdxl", key=None, raw={})
+        payload = {"prepend": False, "batch": {}}
+        graph_info = {"graph": {"id": "graph-1"}, "output": "out"}
+
+        with patch.object(
+            self.client,
+            "_build_enqueue_payload",
+            return_value=(payload, graph_info, 314),
+        ) as mock_prepare, patch(
+            "requests.post",
+            return_value=DummyResponse(
+                {"batch": {"batch_id": "batch-9"}},
+                headers={"Location": f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/i/item-77"},
+            ),
+        ) as mock_post:
+            result = self.client.submit_image_generation(
+                model=model,
+                prompt="sunrise",
+                negative_prompt="",
+                width=512,
+                height=512,
+                steps=25,
+                cfg_scale=7.0,
+                scheduler="euler",
+                seed=123,
+            )
+
+        mock_prepare.assert_called_once()
+        mock_post.assert_called_once_with(
+            f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/enqueue_batch",
+            json=payload,
+            timeout=15,
+        )
+        self.assertEqual(result["batch_id"], "batch-9")
+        self.assertEqual(result["queue_item_id"], "item-77")
+        self.assertEqual(result["seed"], 314)
 
 if __name__ == "__main__":
     unittest.main()
