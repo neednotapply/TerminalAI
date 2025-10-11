@@ -619,23 +619,78 @@ def _display_with_chafapy(image_path: Path) -> bool:
 
 
 def _display_with_chafa_cli(image_path: Path) -> None:
-    try:
-        result = subprocess.run(["chafa", str(image_path)], check=False)
-        if result.returncode not in (0, 1):
-            print(f"{YELLOW}chafa returned code {result.returncode}. Image saved to {image_path}{RESET}")
-    except FileNotFoundError:
+    preferred_cli = "chafa.py"
+    fallback_cli = "chafa"
+
+    for executable, label in ((preferred_cli, "chafa.py"), (fallback_cli, "chafa")):
+        try:
+            result = subprocess.run([executable, str(image_path)], check=False)
+        except FileNotFoundError:
+            continue
+
+        if result.returncode in (0, 1):
+            if executable == fallback_cli:
+                print(
+                    f"{YELLOW}Used legacy '{label}' binary. Consider installing the Python port from https://github.com/GuardKenzie/chafa.py for improved compatibility (MagickWand required for Loader).{RESET}"
+                )
+            return
+
         print(
-            f"{YELLOW}chafa CLI not installed. Install it from https://hpjansson.org/chafa/ or add the 'chafa.py' and 'Pillow' Python packages to enable previews.{RESET}"
+            f"{YELLOW}{label} returned code {result.returncode}. Image saved to {image_path}{RESET}"
         )
+        return
+
+    print(
+        f"{YELLOW}chafa.py CLI not installed. Install it from https://github.com/GuardKenzie/chafa.py (requires MagickWand) or add the 'Pillow' package to enable ANSI previews.{RESET}"
+    )
+
+
+def _display_with_ansi(path: Path) -> bool:
+    if PILImage is None:
+        return False
+
+    try:
+        with PILImage.open(path) as pil_image:
+            pil_image = pil_image.convert("RGB")
+            term_size = shutil.get_terminal_size(fallback=(80, 24))
+            max_width = max(2, min(term_size.columns, 160))
+            width, height = pil_image.size
+            if width == 0 or height == 0:
+                return False
+
+            aspect_ratio = height / width
+            new_height = max(1, int(aspect_ratio * max_width * 0.5))
+            pil_image = pil_image.resize((max_width, new_height))
+
+            pixels = list(pil_image.getdata())
+
+        for row_index in range(new_height):
+            start = row_index * max_width
+            end = start + max_width
+            row_pixels = pixels[start:end]
+            row = "".join(f"\033[48;2;{r};{g};{b}m " for r, g, b in row_pixels)
+            print(f"{row}{RESET}")
+        return True
+    except Exception as exc:  # pragma: no cover - depends on runtime image data
+        print(
+            f"{YELLOW}Failed to render preview using Pillow ANSI fallback: {exc}. Image saved to {path}{RESET}"
+        )
+        return False
 
 
 def display_with_chafa(image_path):
+    path = Path(image_path)
+
     if os.name == "nt":
+        if _display_with_ansi(path):
+            return
         print(f"{YELLOW}Preview not supported on Windows. Image saved to {image_path}{RESET}")
         return
 
-    path = Path(image_path)
     if _display_with_chafapy(path):
+        return
+
+    if _display_with_ansi(path):
         return
 
     _display_with_chafa_cli(path)
