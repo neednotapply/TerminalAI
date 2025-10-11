@@ -641,11 +641,279 @@ def display_with_chafa(image_path):
     _display_with_chafa_cli(path)
 
 
+def _cleanup_image_result(result):
+    path = result.get("path") if isinstance(result, dict) else None
+    metadata_path = result.get("metadata_path") if isinstance(result, dict) else None
+
+    if path:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except Exception as exc:
+            print(f"{YELLOW}Failed to remove preview image {path}: {exc}{RESET}")
+    if metadata_path:
+        try:
+            Path(metadata_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _print_board_image_summary(metadata: Dict[str, Any]) -> None:
+    prompt = metadata.get("prompt") if isinstance(metadata, dict) else None
+    negative = metadata.get("negative_prompt") if isinstance(metadata, dict) else None
+    scheduler = metadata.get("scheduler") if isinstance(metadata, dict) else None
+    seed = metadata.get("seed") if isinstance(metadata, dict) else None
+    model_info = metadata.get("model") if isinstance(metadata, dict) else None
+
+    if isinstance(prompt, str) and prompt.strip():
+        print(f"{CYAN}Prompt:{RESET} {prompt.strip()}")
+    if isinstance(negative, str) and negative.strip():
+        print(f"{CYAN}Negative:{RESET} {negative.strip()}")
+    if isinstance(model_info, dict):
+        model_name = model_info.get("name") or model_info.get("model")
+        model_base = model_info.get("base") or model_info.get("base_model")
+        details = []
+        if isinstance(model_name, str) and model_name.strip():
+            details.append(model_name.strip())
+        if isinstance(model_base, str) and model_base.strip():
+            details.append(model_base.strip())
+        if details:
+            print(f"{CYAN}Model:{RESET} {' • '.join(details)}")
+    if scheduler:
+        print(f"{CYAN}Scheduler:{RESET} {scheduler}")
+    if seed is not None:
+        print(f"{CYAN}Seed:{RESET} {seed}")
+
+
 def confirm_exit():
     choice = interactive_menu("Exit?", ["No", "Yes"])
     return choice == 1
 
 
+def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
+    board_name = board.get("name") if isinstance(board, dict) else "Board"
+    board_id = board.get("id") if isinstance(board, dict) else None
+    if not board_id:
+        print(f"{RED}Selected board entry is missing an id.{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+
+    offset = 0
+    page_size = 5
+
+    while True:
+        try:
+            images = client.list_board_images(board_id, limit=page_size, offset=offset)
+        except InvokeAIClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to return{RESET}")
+            return
+        except requests.RequestException as exc:
+            print(f"{RED}Failed to retrieve board images: {exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to return{RESET}")
+            return
+
+        if not images:
+            if offset == 0:
+                print(f"{YELLOW}No images found on board {board_name}.{RESET}")
+            else:
+                print(f"{YELLOW}No additional images found on board {board_name}.{RESET}")
+            resp = get_input(
+                f"{CYAN}Press Enter to refresh or type 'back' to return: {RESET}"
+            )
+            if resp == "ESC" or resp.strip().lower() == "back":
+                return
+            offset = 0
+            continue
+
+        for entry in images:
+            try:
+                result = client.retrieve_board_image(image_info=entry, board_name=board_name)
+            except InvokeAIClientError as exc:
+                print(f"{YELLOW}Skipping image: {exc}{RESET}")
+                continue
+            except requests.RequestException as exc:
+                print(f"{YELLOW}Failed to download image: {exc}{RESET}")
+                continue
+
+            path = result.get("path") if isinstance(result, dict) else None
+            metadata = result.get("metadata") if isinstance(result, dict) else {}
+            if path:
+                print(f"{CYAN}Preview saved to {path}{RESET}")
+            if isinstance(metadata, dict):
+                _print_board_image_summary(metadata)
+            if path:
+                display_with_chafa(path)
+
+            saved = False
+            while True:
+                action = get_input(
+                    f"{CYAN}Press Enter for next image, type 'save' to keep, or 'back' to return: {RESET}"
+                )
+                if action == "ESC" or action.strip().lower() == "back":
+                    if not saved:
+                        _cleanup_image_result(result)
+                    return
+                if action.strip().lower() == "save":
+                    saved = True
+                    if path:
+                        print(f"{GREEN}Image retained at {path}{RESET}")
+                    meta_path = result.get("metadata_path") if isinstance(result, dict) else None
+                    if meta_path:
+                        print(f"{CYAN}Metadata saved to {meta_path}{RESET}")
+                    continue
+
+                if not saved:
+                    _cleanup_image_result(result)
+                break
+
+        offset += len(images)
+
+
+def _view_server_boards(client: InvokeAIClient) -> None:
+    try:
+        boards = client.list_boards()
+    except InvokeAIClientError as exc:
+        print(f"{RED}{exc}{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+    except requests.RequestException as exc:
+        print(f"{RED}Failed to fetch boards: {exc}{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+
+    if not boards:
+        print(f"{YELLOW}No boards were reported by the server.{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+
+    while True:
+        options = []
+        for board in boards:
+            label = board.get("name", "Unnamed board")
+            count = board.get("count")
+            if isinstance(count, int):
+                label = f"{label} ({count})"
+            options.append(label)
+        options.append("[Back]")
+
+        choice = interactive_menu(f"Boards on {client.nickname}:", options)
+        if choice is None or choice == len(options) - 1:
+            return
+
+        board = boards[choice]
+        clear_screen()
+        print(f"{BOLD}{CYAN}Browsing board: {board.get('name', 'Unnamed')}{RESET}")
+        _browse_board_images(client, board)
+        clear_screen()
+
+
+def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) -> None:
+    if not models:
+        print(f"{RED}No InvokeAI models reported by this server{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+
+    try:
+        scheduler_options = client.list_schedulers()
+    except InvokeAIClientError as exc:
+        print(f"{YELLOW}Failed to retrieve scheduler list: {exc}{RESET}")
+        scheduler_options = []
+    except requests.RequestException as exc:
+        print(f"{YELLOW}Failed to retrieve scheduler list: {exc}{RESET}")
+        scheduler_options = []
+
+    if not scheduler_options:
+        scheduler_options = [DEFAULT_SCHEDULER]
+
+    while True:
+        model = select_invoke_model(models)
+        if model is None:
+            return
+
+        while True:
+            prompt = get_input(f"{CYAN}Prompt: {RESET}")
+            if prompt == "ESC":
+                break
+            if not prompt.strip():
+                print(f"{RED}Prompt cannot be empty{RESET}")
+                continue
+
+            negative = get_input(f"{CYAN}Negative prompt (optional): {RESET}")
+            if negative == "ESC":
+                break
+
+            width = prompt_int("Width (px, multiple of 8)", DEFAULT_WIDTH, minimum=64)
+            if width is None:
+                break
+            height = prompt_int("Height (px, multiple of 8)", DEFAULT_HEIGHT, minimum=64)
+            if height is None:
+                break
+            steps = prompt_int("Steps", DEFAULT_STEPS, minimum=1)
+            if steps is None:
+                break
+            cfg_scale = prompt_float("CFG Scale", DEFAULT_CFG_SCALE, minimum=0.0)
+            if cfg_scale is None:
+                break
+            scheduler = select_scheduler_option(scheduler_options, DEFAULT_SCHEDULER)
+            if scheduler is None:
+                break
+            seed_text = get_input(f"{CYAN}Seed (blank=random): {RESET}")
+            if seed_text == "ESC":
+                break
+
+            seed_val = None
+            seed_text = seed_text.strip()
+            if seed_text:
+                try:
+                    seed_val = int(seed_text)
+                except ValueError:
+                    print(f"{RED}Seed must be an integer{RESET}")
+                    continue
+
+            width = max(64, (int(width) // 8) * 8)
+            height = max(64, (int(height) // 8) * 8)
+
+            try:
+                submission = _invoke_generate_image(
+                    client,
+                    model,
+                    prompt,
+                    negative,
+                    width,
+                    height,
+                    steps,
+                    cfg_scale,
+                    scheduler,
+                    seed_val,
+                    REQUEST_TIMEOUT,
+                )
+            except InvokeAIClientError as exc:
+                print(f"{RED}{exc}{RESET}")
+                get_input(f"{CYAN}Press Enter to try again{RESET}")
+                continue
+            except requests.RequestException as exc:
+                print(f"{RED}Network error: {exc}{RESET}")
+                get_input(f"{CYAN}Press Enter to try again{RESET}")
+                continue
+
+            queue_id = submission.get("queue_item_id") if isinstance(submission, dict) else None
+            batch_id = submission.get("batch_id") if isinstance(submission, dict) else None
+            seed_used = submission.get("seed") if isinstance(submission, dict) else None
+
+            print(f"{GREEN}Prompt sent to {client.nickname}.{RESET}")
+            if queue_id:
+                print(f"{CYAN}Queue item id: {queue_id}{RESET}")
+            else:
+                print(
+                    f"{YELLOW}Server did not return a queue item id. Check the Auto board for the finished image.{RESET}"
+                )
+            if batch_id:
+                print(f"{CYAN}Batch id: {batch_id}{RESET}")
+            if seed_used is not None:
+                print(f"{CYAN}Seed used: {seed_used}{RESET}")
+
+            get_input(f"{CYAN}Press Enter to return to the InvokeAI menu{RESET}")
+            return
 def _invoke_generate_image(
     client: InvokeAIClient,
     model: "InvokeAIModel",
@@ -666,7 +934,7 @@ def _invoke_generate_image(
     negative_text = (negative_prompt or "").strip()
     scheduler_name = (scheduler or "").strip() or DEFAULT_SCHEDULER
 
-    return client.generate_image(
+    return client.submit_image_generation(
         model=model,
         prompt=prompt_text,
         negative_prompt=negative_text,
@@ -676,7 +944,6 @@ def _invoke_generate_image(
         cfg_scale=float(cfg_scale),
         scheduler=scheduler_name,
         seed=seed,
-        timeout=float(timeout),
     )
 
 
@@ -1101,70 +1368,30 @@ def select_invoke_model(models):
 
 
 def select_scheduler_option(options: List[str], default_value: str) -> Optional[str]:
-    unique: List[str] = []
+    """Prompt for a scheduler using free text input."""
+
+    cleaned: List[str] = []
     seen: set[str] = set()
     for opt in options:
         if not isinstance(opt, str):
             continue
         text = opt.strip()
-        if not text or text in seen:
+        if not text or text.lower() in seen:
             continue
-        seen.add(text)
-        unique.append(text)
+        seen.add(text.lower())
+        cleaned.append(text)
 
-    if default_value and default_value not in seen:
-        unique.insert(0, default_value)
+    if cleaned:
+        print(f"{CYAN}Available schedulers: {', '.join(cleaned)}{RESET}")
 
-    manual_label = "Manual entry..."
-    back_label = "[Back]"
-
-    if DEBUG_MODE:
-        print(f"{CYAN}Available Schedulers:{RESET}")
-        for idx, value in enumerate(unique, 1):
-            marker = " (default)" if value == default_value else ""
-            print(f"{GREEN}{idx}. {value}{marker}{RESET}")
-        print(f"{GREEN}{len(unique) + 1}. {manual_label}{RESET}")
-        print(f"{GREEN}0. {back_label}{RESET}")
-        while True:
-            choice = get_input(f"{CYAN}Select scheduler: {RESET}")
-            if choice in ("ESC", "0") or choice.lower() == "back":
-                return None
-            if choice.isdigit():
-                idx = int(choice)
-                if 1 <= idx <= len(unique):
-                    return unique[idx - 1]
-                if idx == len(unique) + 1:
-                    entry = get_input(
-                        f"{CYAN}Enter scheduler name (blank=default): {RESET}"
-                    )
-                    if entry == "ESC":
-                        continue
-                    entry = entry.strip()
-                    return entry or default_value
-            print(f"{RED}Invalid selection{RESET}")
-    else:
-        labels = [
-            f"{value} (default)" if value == default_value else value for value in unique
-        ]
-        labels.append(manual_label)
-        labels.append(back_label)
-
-        while True:
-            choice = interactive_menu("InvokeAI Schedulers:", labels)
-            if choice is None:
-                return None
-            if choice < len(unique):
-                return unique[choice]
-            if choice == len(unique):
-                entry = get_input(f"{CYAN}Enter scheduler name (blank=default): {RESET}")
-                if entry == "ESC":
-                    continue
-                entry = entry.strip()
-                return entry or default_value
-            if choice == len(unique) + 1:
-                return None
-
-    return default_value
+    while True:
+        entry = get_input(f"{CYAN}Scheduler [{default_value}]: {RESET}")
+        if entry == "ESC":
+            return None
+        entry = entry.strip()
+        if not entry:
+            return default_value
+        return entry
 
 
 def fetch_models():
@@ -1796,118 +2023,25 @@ def run_image_mode():
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
         if not models:
-            print(f"{RED}No InvokeAI models reported by this server{RESET}")
-            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
-            continue
-
-        try:
-            scheduler_options = client.list_schedulers()
-        except InvokeAIClientError as exc:
-            print(f"{YELLOW}Failed to retrieve scheduler list: {exc}{RESET}")
-            scheduler_options = []
-        except requests.RequestException as exc:
-            print(f"{YELLOW}Failed to retrieve scheduler list: {exc}{RESET}")
-            scheduler_options = []
-
-        if not scheduler_options:
-            scheduler_options = [DEFAULT_SCHEDULER]
+            print(f"{YELLOW}This server did not return any models. Image generation may be unavailable.{RESET}")
+            get_input(f"{CYAN}Press Enter to continue{RESET}")
+            clear_screen()
 
         while True:
-            model = select_invoke_model(models)
-            if model is None:
+            options = ["View Boards", "Generate Images", "[Back]"]
+            header = f"InvokeAI on {client.nickname}:"
+            choice = interactive_menu(header, options)
+            if choice is None or choice == len(options) - 1:
                 break
-            while True:
-                prompt = get_input(f"{CYAN}Prompt: {RESET}")
-                if prompt == "ESC":
-                    break
-                if not prompt.strip():
-                    print(f"{RED}Prompt cannot be empty{RESET}")
-                    continue
-                negative = get_input(f"{CYAN}Negative prompt (optional): {RESET}")
-                if negative == "ESC":
-                    break
-                width = prompt_int("Width (px, multiple of 8)", DEFAULT_WIDTH, minimum=64)
-                if width is None:
-                    break
-                height = prompt_int("Height (px, multiple of 8)", DEFAULT_HEIGHT, minimum=64)
-                if height is None:
-                    break
-                steps = prompt_int("Steps", DEFAULT_STEPS, minimum=1)
-                if steps is None:
-                    break
-                cfg_scale = prompt_float("CFG Scale", DEFAULT_CFG_SCALE, minimum=0.0)
-                if cfg_scale is None:
-                    break
-                scheduler = select_scheduler_option(scheduler_options, DEFAULT_SCHEDULER)
-                if scheduler is None:
-                    break
-                seed_text = get_input(f"{CYAN}Seed (blank=random): {RESET}")
-                if seed_text == "ESC":
-                    break
-                seed_val = None
-                seed_text = seed_text.strip()
-                if seed_text:
-                    try:
-                        seed_val = int(seed_text)
-                    except ValueError:
-                        print(f"{RED}Seed must be an integer{RESET}")
-                        continue
-
-                width = max(64, (width // 8) * 8)
-                height = max(64, (height // 8) * 8)
-
-                try:
-                    result = _invoke_generate_image(
-                        client,
-                        model,
-                        prompt,
-                        negative,
-                        width,
-                        height,
-                        steps,
-                        cfg_scale,
-                        scheduler,
-                        seed_val,
-                        REQUEST_TIMEOUT,
-                    )
-                except InvokeAIClientError as exc:
-                    print(f"{RED}{exc}{RESET}")
-                    get_input(f"{CYAN}Press Enter to try again{RESET}")
-                    continue
-                except requests.RequestException as exc:
-                    print(f"{RED}Network error: {exc}{RESET}")
-                    get_input(f"{CYAN}Press Enter to try again{RESET}")
-                    continue
-
-                image_path = result["path"]
-                print(f"{GREEN}Image saved to {image_path}{RESET}")
-                metadata_path = result.get("metadata_path")
-                if metadata_path:
-                    print(f"{CYAN}Metadata saved to {metadata_path}{RESET}")
-                display_with_chafa(image_path)
-
-                keep = get_input(f"{CYAN}Keep image? (y/n) [y]: {RESET}")
-                if keep == "ESC":
-                    keep = "y"
-                if keep and keep.lower().startswith("n"):
-                    try:
-                        image_path.unlink(missing_ok=True)
-                        if metadata_path:
-                            Path(metadata_path).unlink(missing_ok=True)
-                        print(f"{YELLOW}Image discarded.{RESET}")
-                    except Exception as exc:
-                        print(f"{RED}Failed to delete image: {exc}{RESET}")
-                else:
-                    print(f"{GREEN}Image retained.{RESET}")
-
-                cont = get_input(
-                    f"{CYAN}Press Enter to generate again, type 'back' to change model, or ESC for server menu: {RESET}"
-                )
-                if cont == "ESC":
-                    return
-                if cont.strip().lower() == "back":
-                    break
-            break
+            if choice == 0:
+                clear_screen()
+                _view_server_boards(client)
+                clear_screen()
+                continue
+            if choice == 1:
+                clear_screen()
+                _run_generation_flow(client, models)
+                clear_screen()
 
 
 # Main loop

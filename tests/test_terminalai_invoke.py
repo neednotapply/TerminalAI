@@ -17,10 +17,11 @@ import TerminalAI  # noqa: E402
 class TerminalAIInvokeTests(unittest.TestCase):
     def setUp(self):
         self.client = MagicMock()
+        self.client.submit_image_generation = MagicMock()
         self.model = InvokeAIModel(name="model", base="sdxl", key=None, raw={})
 
     def test_invoke_generate_image_forwards_arguments(self):
-        self.client.generate_image.return_value = {"path": "foo"}
+        self.client.submit_image_generation.return_value = {"queue_item_id": "abc"}
 
         result = TerminalAI._invoke_generate_image(
             self.client,
@@ -36,7 +37,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             90,
         )
 
-        self.client.generate_image.assert_called_once_with(
+        self.client.submit_image_generation.assert_called_once_with(
             model=self.model,
             prompt="prompt text",
             negative_prompt="negative",
@@ -46,12 +47,11 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=6.5,
             scheduler="custom_scheduler",
             seed=123,
-            timeout=90.0,
         )
-        self.assertEqual(result, {"path": "foo"})
+        self.assertEqual(result, {"queue_item_id": "abc"})
 
     def test_invoke_generate_image_applies_defaults(self):
-        self.client.generate_image.return_value = {"path": "bar"}
+        self.client.submit_image_generation.return_value = {"queue_item_id": None}
 
         result = TerminalAI._invoke_generate_image(
             self.client,
@@ -67,7 +67,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             45,
         )
 
-        self.client.generate_image.assert_called_once_with(
+        self.client.submit_image_generation.assert_called_once_with(
             model=self.model,
             prompt="Prompt",
             negative_prompt="",
@@ -77,9 +77,8 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=7.5,
             scheduler=TerminalAI.DEFAULT_SCHEDULER,
             seed=None,
-            timeout=45.0,
         )
-        self.assertEqual(result, {"path": "bar"})
+        self.assertEqual(result, {"queue_item_id": None})
 
     def test_invoke_generate_image_requires_prompt(self):
         with self.assertRaises(TerminalAI.InvokeAIClientError):
