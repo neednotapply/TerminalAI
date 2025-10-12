@@ -5,6 +5,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from typing import Any, Dict, Optional
 from unittest.mock import call, patch
 
 import requests
@@ -196,6 +197,80 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(self.tmpdir.name))
+
+    def test_ensure_board_returns_existing_id_on_422(self):
+        error = requests.HTTPError(response=DummyResponse(status_code=422))
+        with patch.object(
+            self.client,
+            "_fetch_board_id",
+            side_effect=[None, "board-123"],
+        ) as mock_fetch, patch(
+            "requests.post",
+            side_effect=error,
+        ) as mock_post:
+            board_id = self.client.ensure_board("TerminalAI")
+
+        self.assertEqual(board_id, "board-123")
+        self.assertEqual(
+            mock_fetch.call_args_list,
+            [call("TerminalAI"), call("TerminalAI")],
+        )
+        mock_post.assert_called_once_with(
+            f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
+            json={"name": "TerminalAI", "board_name": "TerminalAI"},
+            timeout=15,
+        )
+
+    def test_ensure_board_sends_board_name(self):
+        with patch.object(self.client, "_fetch_board_id", return_value=None) as mock_fetch, patch(
+            "requests.post",
+            return_value=DummyResponse({"id": "board-123"}),
+        ) as mock_post:
+            board_id = self.client.ensure_board("TerminalAI")
+
+        self.assertEqual(board_id, "board-123")
+        mock_fetch.assert_called_once_with("TerminalAI")
+        mock_post.assert_called_once_with(
+            f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
+            json={"name": "TerminalAI", "board_name": "TerminalAI"},
+            timeout=15,
+        )
+
+    def test_fetch_board_id_recovers_from_missing_all_parameter(self):
+        attempts: list[Optional[Dict[str, Any]]] = []
+
+        def fake_get(url, params=None, timeout=15):
+            self.assertEqual(url, f"http://{TEST_SERVER_IP}:9090/api/v1/boards/")
+            attempts.append(params)
+            if len(attempts) < 3:
+                return DummyResponse(
+                    {"detail": "Invalid request: Must provide either 'all' or both 'offset' and 'limit'"},
+                    status_code=422,
+                )
+            return DummyResponse(
+                {
+                    "items": [
+                        {
+                            "board_id": "board-999",
+                            "board_name": "TerminalAI",
+                        }
+                    ]
+                }
+            )
+
+        with patch("requests.get", side_effect=fake_get) as mock_get:
+            board_id = self.client._fetch_board_id("TerminalAI")
+
+        self.assertEqual(board_id, "board-999")
+        self.assertEqual(
+            attempts,
+            [
+                {"all": True},
+                {"all": "true"},
+                {"offset": 0, "limit": 1000},
+            ],
+        )
+        self.assertEqual(mock_get.call_count, 3)
 
     def test_list_schedulers_prefers_metadata(self):
         metadata_payload = {
