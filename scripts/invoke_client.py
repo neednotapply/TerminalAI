@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import json
 import random
 import time
@@ -862,10 +863,7 @@ class InvokeAIClient:
                 continue
             board_id = entry.get("board_id") or entry.get("id")
             name = entry.get("board_name") or entry.get("name")
-            if isinstance(board_id, str) and board_id.strip():
-                normalized_id = board_id.strip()
-            else:
-                normalized_id = None
+            normalized_id = self._normalize_board_id(board_id)
 
             normalized_name = name.strip() if isinstance(name, str) else ""
             is_uncategorized = False
@@ -975,16 +973,16 @@ class InvokeAIClient:
 
         if isinstance(payload, dict):
             for key in ("id", "board_id"):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+                value = self._normalize_board_id(payload.get(key))
+                if value:
+                    return value
 
             nested = payload.get("board") if isinstance(payload.get("board"), dict) else None
             if isinstance(nested, dict):
                 for key in ("id", "board_id"):
-                    value = nested.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
+                    value = self._normalize_board_id(nested.get(key))
+                    if value:
+                        return value
 
         return None
 
@@ -1187,6 +1185,7 @@ class InvokeAIClient:
             cfg_scale=cfg_scale,
             scheduler=scheduler,
             seed=seed_value,
+            board_id=board_id,
         )
 
         batch_payload: Dict[str, Any] = {
@@ -1506,8 +1505,9 @@ class InvokeAIClient:
             label = entry.get("board_name") or entry.get("name")
             if isinstance(label, str) and label.strip().lower() == name_norm:
                 board_id = entry.get("board_id") or entry.get("id")
-                if isinstance(board_id, str) and board_id.strip():
-                    return board_id
+                normalized_id = self._normalize_board_id(board_id)
+                if normalized_id:
+                    return normalized_id
         return None
 
     def _fetch_boards_payload(self, *, strict: bool) -> Any:
@@ -1729,6 +1729,25 @@ class InvokeAIClient:
             session_id=session_id,
         )
 
+    def _normalize_board_id(self, board_id: Any) -> Optional[str]:
+        """Normalize a board identifier into a non-empty string if possible."""
+
+        if isinstance(board_id, str):
+            text = board_id.strip()
+            return text or None
+        if isinstance(board_id, bool):
+            return None
+        if isinstance(board_id, int):
+            return str(board_id)
+        if isinstance(board_id, float):
+            if math.isfinite(board_id):
+                if board_id.is_integer():
+                    return str(int(board_id))
+                text = str(board_id).strip()
+                return text or None
+            return None
+        return None
+
     def _extract_image_result(self, session: Dict[str, Any], output_node: str) -> Dict[str, Any]:
         results = session.get("results")
         if not isinstance(results, dict):
@@ -1763,12 +1782,35 @@ class InvokeAIClient:
         cfg_scale: float,
         scheduler: str,
         seed: int,
+        board_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         base = model.base.lower()
         if base in {"sd-1", "sd1", "sd-2", "sd2", "stable-diffusion-1", "stable-diffusion-2"}:
-            return self._build_sd_graph(model.raw, prompt, negative_prompt, width, height, steps, cfg_scale, scheduler, seed)
+            return self._build_sd_graph(
+                model.raw,
+                prompt,
+                negative_prompt,
+                width,
+                height,
+                steps,
+                cfg_scale,
+                scheduler,
+                seed,
+                board_id,
+            )
         if base in {"sdxl", "sdxl-refiner", "stable-diffusion-xl"}:
-            return self._build_sdxl_graph(model.raw, prompt, negative_prompt, width, height, steps, cfg_scale, scheduler, seed)
+            return self._build_sdxl_graph(
+                model.raw,
+                prompt,
+                negative_prompt,
+                width,
+                height,
+                steps,
+                cfg_scale,
+                scheduler,
+                seed,
+                board_id,
+            )
         raise InvokeAIClientError(f"Unsupported InvokeAI base model: {base or 'unknown'}")
 
     def _build_sd_graph(
@@ -1782,6 +1824,7 @@ class InvokeAIClient:
         cfg_scale: float,
         scheduler: str,
         seed: int,
+        board_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         graph_id = "terminal_sd_graph"
         clip_skip_layers = model_cfg.get("clip_skip", 0)
@@ -1826,7 +1869,14 @@ class InvokeAIClient:
                 "type": "l2i",
                 "fp32": False,
             },
+            "save_image": {
+                "id": "save_image",
+                "type": "save_image",
+            },
         }
+
+        if board_id:
+            nodes["save_image"]["board"] = board_id
 
         edges: List[Dict[str, Dict[str, str]]] = []
         if use_clip_skip:
@@ -1879,11 +1929,15 @@ class InvokeAIClient:
                     "source": {"node_id": "denoise", "field": "latents"},
                     "destination": {"node_id": "latents_to_image", "field": "latents"},
                 },
+                {
+                    "source": {"node_id": "latents_to_image", "field": "image"},
+                    "destination": {"node_id": "save_image", "field": "image"},
+                },
             ]
         )
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
-        return {"graph": graph, "data": None, "output": "latents_to_image"}
+        return {"graph": graph, "data": None, "output": "save_image"}
 
     def _extract_queue_item_id(
         self, payload: Any, *, allow_generic_id: bool = True
@@ -2045,6 +2099,7 @@ class InvokeAIClient:
         cfg_scale: float,
         scheduler: str,
         seed: int,
+        board_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         graph_id = "terminal_sdxl_graph"
         nodes: Dict[str, Dict[str, Any]] = {
@@ -2100,7 +2155,14 @@ class InvokeAIClient:
                 "type": "l2i",
                 "fp32": False,
             },
+            "save_image": {
+                "id": "save_image",
+                "type": "save_image",
+            },
         }
+
+        if board_id:
+            nodes["save_image"]["board"] = board_id
 
         edges = [
             {
@@ -2143,10 +2205,14 @@ class InvokeAIClient:
                 "source": {"node_id": "denoise", "field": "latents"},
                 "destination": {"node_id": "latents_to_image", "field": "latents"},
             },
+            {
+                "source": {"node_id": "latents_to_image", "field": "image"},
+                "destination": {"node_id": "save_image", "field": "image"},
+            },
         ]
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
-        return {"graph": graph, "data": None, "output": "latents_to_image"}
+        return {"graph": graph, "data": None, "output": "save_image"}
 
 
 __all__ = ["InvokeAIClient", "InvokeAIClientError", "InvokeAIModel"]
