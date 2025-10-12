@@ -920,10 +920,25 @@ class InvokeAIClient:
 
         boards_url = f"{self.base_url}/api/v1/boards/"
         payload = {"name": normalized, "board_name": normalized}
+        resp: Optional[requests.Response] = None
         try:
             resp = requests.post(boards_url, json=payload, timeout=15)
             resp.raise_for_status()
         except requests.RequestException as exc:
+            if self._requires_board_name_query_parameter(exc):
+                try:
+                    resp = requests.post(
+                        boards_url,
+                        params={"board_name": normalized},
+                        json=payload,
+                        timeout=15,
+                    )
+                    resp.raise_for_status()
+                except requests.RequestException as query_exc:
+                    exc = query_exc
+                else:
+                    return self._finalize_board_creation(resp, normalized)
+
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code in {409, 422}:
                 # Some InvokeAI versions return a client error when the board
@@ -937,33 +952,77 @@ class InvokeAIClient:
                 f"Failed to create board '{normalized}': {self._summarize_http_error(exc)}"
             ) from exc
 
-        data = self._safe_json(resp)
-        board_id: Optional[str] = None
-        if isinstance(data, dict):
-            for key in ("id", "board_id"):
-                value = data.get(key)
-                if isinstance(value, str) and value.strip():
-                    board_id = value.strip()
-                    break
-            if board_id is None:
-                nested = data.get("board") if isinstance(data.get("board"), dict) else None
-                if isinstance(nested, dict):
-                    for key in ("id", "board_id"):
-                        value = nested.get(key)
-                        if isinstance(value, str) and value.strip():
-                            board_id = value.strip()
-                            break
+        return self._finalize_board_creation(resp, normalized)
 
+    def _finalize_board_creation(self, response: requests.Response, board_name: str) -> str:
+        """Extract the board id from a creation response, falling back to listing."""
+
+        data = self._safe_json(response)
+        board_id = self._extract_board_id_from_payload(data)
         if board_id:
             return board_id
 
-        fetched = self._fetch_board_id(normalized)
+        fetched = self._fetch_board_id(board_name)
         if fetched:
             return fetched
 
         raise InvokeAIClientError(
-            f"InvokeAI server did not report an id for board '{normalized}'"
+            f"InvokeAI server did not report an id for board '{board_name}'"
         )
+
+    def _extract_board_id_from_payload(self, payload: Any) -> Optional[str]:
+        """Return the board identifier from an API response payload."""
+
+        if isinstance(payload, dict):
+            for key in ("id", "board_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+            nested = payload.get("board") if isinstance(payload.get("board"), dict) else None
+            if isinstance(nested, dict):
+                for key in ("id", "board_id"):
+                    value = nested.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+
+        return None
+
+    def _requires_board_name_query_parameter(self, exc: requests.RequestException) -> bool:
+        """Detect InvokeAI servers that expect board_name as a query parameter."""
+
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) != 422:
+            return False
+
+        details: list[str] = []
+        try:
+            payload = response.json() if response is not None else None
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            detail = payload.get("detail")
+            if isinstance(detail, list):
+                for entry in detail:
+                    if isinstance(entry, dict):
+                        message = entry.get("msg") or entry.get("message")
+                        if isinstance(message, str):
+                            details.append(message.lower())
+                        loc = entry.get("loc")
+                        if isinstance(loc, (list, tuple)):
+                            details.append(".".join(str(part).lower() for part in loc))
+            elif isinstance(detail, str):
+                details.append(detail.lower())
+
+        if not details and response is not None:
+            try:
+                details.append(response.text.lower())
+            except Exception:
+                pass
+
+        combined = " ".join(details)
+        return "board_name" in combined and "field required" in combined
 
     def list_board_images(
         self,
