@@ -234,7 +234,7 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         )
 
         nodes = info["graph"]["nodes"]
-        self.assertEqual(nodes["save_image"].get("board"), "board-123")
+        self.assertEqual(nodes["save_image"].get("board_id"), "board-123")
         self.assertIn(
             {
                 "source": {"node_id": "latents_to_image", "field": "image"},
