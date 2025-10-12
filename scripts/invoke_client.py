@@ -264,6 +264,32 @@ class InvokeAIClient:
         except ValueError:
             return None
 
+    def _summarize_http_error(self, exc: requests.RequestException) -> str:
+        message = str(exc)
+        response = getattr(exc, "response", None)
+        detail: Optional[str] = None
+        if response is not None:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+
+            if isinstance(payload, dict):
+                for key in ("detail", "message", "error"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        detail = value.strip()
+                        break
+
+            if detail is None and isinstance(response.content, (bytes, bytearray)):
+                text = response.content.decode(errors="ignore").strip()
+                if text:
+                    detail = text
+
+        if detail:
+            return f"{message} ({detail})"
+        return message
+
     def _candidate_model_endpoints(
         self, base_url: str
     ) -> Iterable[Tuple[str, Optional[Dict[str, Any]]]]:
@@ -820,14 +846,7 @@ class InvokeAIClient:
     def list_boards(self) -> List[Dict[str, Any]]:
         """Return the boards available on the InvokeAI server."""
 
-        boards_url = f"{self.base_url}/api/v1/boards/"
-        try:
-            resp = requests.get(boards_url, params={"all": "true"}, timeout=15)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise InvokeAIClientError(f"Failed to retrieve boards: {exc}") from exc
-
-        payload = self._safe_json(resp)
+        payload = self._fetch_boards_payload(strict=True)
         if isinstance(payload, dict):
             items = payload.get("items")
             candidates = items if isinstance(items, list) else []
@@ -900,13 +919,22 @@ class InvokeAIClient:
             return existing_id
 
         boards_url = f"{self.base_url}/api/v1/boards/"
-        payload = {"name": normalized}
+        payload = {"name": normalized, "board_name": normalized}
         try:
             resp = requests.post(boards_url, json=payload, timeout=15)
             resp.raise_for_status()
         except requests.RequestException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {409, 422}:
+                # Some InvokeAI versions return a client error when the board
+                # already exists.  Treat this as a success and fall back to
+                # fetching the board identifier via the listing endpoint so we
+                # behave consistently across server versions.
+                existing_id = self._fetch_board_id(normalized)
+                if existing_id:
+                    return existing_id
             raise InvokeAIClientError(
-                f"Failed to create board '{normalized}': {exc}"
+                f"Failed to create board '{normalized}': {self._summarize_http_error(exc)}"
             ) from exc
 
         data = self._safe_json(resp)
@@ -1406,14 +1434,7 @@ class InvokeAIClient:
         if not name_norm:
             return None
 
-        boards_url = f"{self.base_url}/api/v1/boards/"
-        try:
-            resp = requests.get(boards_url, params={"all": "true"}, timeout=15)
-            resp.raise_for_status()
-        except requests.RequestException:
-            return None
-
-        payload = self._safe_json(resp)
+        payload = self._fetch_boards_payload(strict=False)
         candidates: List[Dict[str, Any]] = []
         if isinstance(payload, list):
             candidates = [entry for entry in payload if isinstance(entry, dict)]
@@ -1428,6 +1449,41 @@ class InvokeAIClient:
                 board_id = entry.get("board_id") or entry.get("id")
                 if isinstance(board_id, str) and board_id.strip():
                     return board_id
+        return None
+
+    def _fetch_boards_payload(self, *, strict: bool) -> Any:
+        boards_url = f"{self.base_url}/api/v1/boards/"
+        query_variants: List[Optional[Dict[str, Any]]] = [
+            {"all": True},
+            {"all": "true"},
+            {"offset": 0, "limit": 1000},
+            None,
+        ]
+
+        last_error: Optional[requests.RequestException] = None
+        for params in query_variants:
+            kwargs: Dict[str, Any] = {"timeout": 15}
+            if params is not None:
+                kwargs["params"] = params
+            try:
+                resp = requests.get(boards_url, **kwargs)
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                last_error = exc
+                continue
+
+            payload = self._safe_json(resp)
+            if payload is not None:
+                return payload
+
+        if strict:
+            message = "Failed to retrieve boards"
+            if last_error is not None:
+                raise InvokeAIClientError(
+                    f"{message}: {self._summarize_http_error(last_error)}"
+                ) from last_error
+            raise InvokeAIClientError(f"{message}: Empty response")
+
         return None
 
     def _fetch_latest_board_image(self, board_id: str) -> Optional[Dict[str, Any]]:
