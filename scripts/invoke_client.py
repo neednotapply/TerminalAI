@@ -121,6 +121,7 @@ class InvokeAIClient:
         self.nickname = nickname or ip
         self._base_urls = self._build_base_urls(scheme, allow_https_fallback)
         self.base_url = self._base_urls[0]
+        self._board_cache: Dict[str, str] = {}
         base_data = data_dir if data_dir is not None else Path(__file__).resolve().parent.parent / "data"
         self.images_dir = Path(base_data) / "images"
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -677,10 +678,7 @@ class InvokeAIClient:
     ) -> Dict[str, Any]:
         """Submit a generation request and return queue identifiers."""
 
-        board_id: Optional[str] = None
-        normalized_board = board_name.strip() if isinstance(board_name, str) else ""
-        if normalized_board:
-            board_id = self.ensure_board(normalized_board)
+        board_id, normalized_board = self._resolve_board_reference(board_name, create=True)
         board_label = normalized_board or None
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
@@ -739,10 +737,7 @@ class InvokeAIClient:
     ) -> Dict[str, Any]:
         """Generate an image and return metadata about the result."""
 
-        board_id: Optional[str] = None
-        normalized_board = board_name.strip() if isinstance(board_name, str) else ""
-        if normalized_board:
-            board_id = self.ensure_board(normalized_board)
+        board_id, normalized_board = self._resolve_board_reference(board_name, create=True)
         board_label = normalized_board or None
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
@@ -1052,12 +1047,15 @@ class InvokeAIClient:
 
             if normalized_board_name:
                 try:
-                    board_identifier = self._fetch_board_id(normalized_board_name)
+                    board_identifier, normalized_label = self._resolve_board_reference(
+                        normalized_board_name, create=False
+                    )
                 except InvokeAIClientError as exc:
                     fallback_errors.append(str(exc))
                     board_identifier = None
+                    normalized_label = normalized_board_name
                 if board_identifier:
-                    board_targets.append((board_identifier, normalized_board_name))
+                    board_targets.append((board_identifier, normalized_label))
 
             if normalized_board_name.lower() != UNCATEGORIZED_BOARD_NAME.lower():
                 board_targets.append((UNCATEGORIZED_BOARD_ID, UNCATEGORIZED_BOARD_NAME))
@@ -1155,6 +1153,8 @@ class InvokeAIClient:
                 continue
 
             display_name = normalized_name if normalized_name else normalized_id
+            if normalized_name:
+                self._cache_board_id(normalized_name, normalized_id)
             info: Dict[str, Any] = {
                 "id": normalized_id,
                 "name": display_name,
@@ -1178,15 +1178,55 @@ class InvokeAIClient:
         boards.sort(key=lambda value: value.get("name", "").lower())
         return boards
 
+    def _resolve_board_reference(
+        self, board_name: Optional[str], *, create: bool
+    ) -> Tuple[Optional[str], str]:
+        """Return the board id and normalized name for a given board."""
+
+        normalized = self._normalize_board_name(board_name)
+        if not normalized:
+            return None, ""
+
+        cache_key = normalized.lower()
+        cached = self._board_cache.get(cache_key)
+        if cached:
+            return cached, normalized
+
+        if create:
+            board_id = self.ensure_board(normalized)
+        else:
+            board_id = self._fetch_board_id(normalized)
+
+        if board_id:
+            self._cache_board_id(normalized, board_id)
+            return board_id, normalized
+
+        return None, normalized
+
+    def _normalize_board_name(self, board_name: Optional[str]) -> str:
+        return board_name.strip() if isinstance(board_name, str) else ""
+
+    def _cache_board_id(self, board_name: str, board_id: Optional[str]) -> None:
+        normalized = self._normalize_board_name(board_name)
+        normalized_id = self._normalize_board_id(board_id)
+        if not normalized or not normalized_id:
+            return
+        self._board_cache[normalized.lower()] = normalized_id
+
     def ensure_board(self, board_name: str) -> Optional[str]:
         """Ensure a board exists on the server and return its identifier."""
 
-        normalized = board_name.strip() if isinstance(board_name, str) else ""
+        normalized = self._normalize_board_name(board_name)
         if not normalized:
             return None
 
+        cached = self._board_cache.get(normalized.lower())
+        if cached:
+            return cached
+
         existing_id = self._fetch_board_id(normalized)
         if existing_id:
+            self._cache_board_id(normalized, existing_id)
             return existing_id
 
         boards_url = f"{self.base_url}/api/v1/boards/"
@@ -1218,6 +1258,7 @@ class InvokeAIClient:
                 # behave consistently across server versions.
                 existing_id = self._fetch_board_id(normalized)
                 if existing_id:
+                    self._cache_board_id(normalized, existing_id)
                     return existing_id
             raise InvokeAIClientError(
                 f"Failed to create board '{normalized}': {self._summarize_http_error(exc)}"
@@ -1231,10 +1272,12 @@ class InvokeAIClient:
         data = self._safe_json(response)
         board_id = self._extract_board_id_from_payload(data)
         if board_id:
+            self._cache_board_id(board_name, board_id)
             return board_id
 
         fetched = self._fetch_board_id(board_name)
         if fetched:
+            self._cache_board_id(board_name, fetched)
             return fetched
 
         raise InvokeAIClientError(
@@ -1729,7 +1772,7 @@ class InvokeAIClient:
         enqueue_started: float,
         timeout: float,
     ) -> Optional[Dict[str, Any]]:
-        board_id = self._fetch_board_id(board_name)
+        board_id, _ = self._resolve_board_reference(board_name, create=False)
 
         fetchers: List[Callable[[], Optional[Dict[str, Any]]]] = []
         if board_id:
@@ -1765,9 +1808,14 @@ class InvokeAIClient:
         return None
 
     def _fetch_board_id(self, board_name: str) -> Optional[str]:
-        name_norm = board_name.strip().lower()
-        if not name_norm:
+        normalized_name = self._normalize_board_name(board_name)
+        if not normalized_name:
             return None
+
+        cache_key = normalized_name.lower()
+        cached = self._board_cache.get(cache_key)
+        if cached:
+            return cached
 
         payload = self._fetch_boards_payload(strict=False)
         candidates: List[Dict[str, Any]] = []
@@ -1777,13 +1825,18 @@ class InvokeAIClient:
             items = payload.get("items")
             if isinstance(items, list):
                 candidates = [entry for entry in items if isinstance(entry, dict)]
+            else:
+                boards = payload.get("boards")
+                if isinstance(boards, list):
+                    candidates = [entry for entry in boards if isinstance(entry, dict)]
 
         for entry in candidates:
             label = entry.get("board_name") or entry.get("name")
-            if isinstance(label, str) and label.strip().lower() == name_norm:
+            if isinstance(label, str) and self._normalize_board_name(label).lower() == cache_key:
                 board_id = entry.get("board_id") or entry.get("id")
                 normalized_id = self._normalize_board_id(board_id)
                 if normalized_id:
+                    self._cache_board_id(normalized_name, normalized_id)
                     return normalized_id
         return None
 
