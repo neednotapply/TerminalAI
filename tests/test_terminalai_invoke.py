@@ -119,6 +119,24 @@ class TerminalAIInvokeTests(unittest.TestCase):
                 30,
             )
 
+    def test_invoke_generate_image_rejects_uncategorized_board(self):
+        self.client.ensure_board.return_value = TerminalAI.UNCATEGORIZED_BOARD_ID
+
+        with self.assertRaises(TerminalAI.InvokeAIClientError):
+            TerminalAI._invoke_generate_image(
+                self.client,
+                self.model,
+                "Prompt",
+                "",
+                512,
+                512,
+                20,
+                7.0,
+                "",
+                None,
+                30,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

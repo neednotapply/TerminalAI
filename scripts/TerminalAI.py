@@ -1228,7 +1228,11 @@ def _invoke_generate_image(
         raise InvokeAIClientError("Prompt must not be empty")
 
     board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
-    if not isinstance(board_id, str) or not board_id.strip():
+    if (
+        not isinstance(board_id, str)
+        or not board_id.strip()
+        or board_id == UNCATEGORIZED_BOARD_ID
+    ):
         raise InvokeAIClientError(
             f"Failed to resolve InvokeAI board '{TERMINALAI_BOARD_NAME}'"
         )
@@ -2288,7 +2292,11 @@ def run_image_mode():
             print(f"{RED}{exc}{RESET}")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
-        if not isinstance(board_id, str) or not board_id.strip():
+        if (
+            not isinstance(board_id, str)
+            or not board_id.strip()
+            or board_id == UNCATEGORIZED_BOARD_ID
+        ):
             print(
                 f"{RED}InvokeAI server did not provide a valid id for board {TERMINALAI_BOARD_NAME}.{RESET}"
             )
