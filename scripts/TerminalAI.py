@@ -55,6 +55,24 @@ BOLD = "\033[1m"
 AI_COLOR = "\033[32m"
 
 TERMINALAI_BOARD_NAME = "TerminalAI"
+TERMINALAI_BOARD_RESOLUTION_ERROR = (
+    f"Failed to resolve InvokeAI board '{TERMINALAI_BOARD_NAME}'"
+)
+TERMINALAI_BOARD_ID_ERROR_MESSAGE = (
+    f"InvokeAI server did not provide a valid id for board {TERMINALAI_BOARD_NAME}."
+)
+
+
+def _normalize_board_id(board_id: Any) -> Optional[str]:
+    if not isinstance(board_id, str):
+        return None
+    candidate = board_id.strip()
+    return candidate or None
+
+
+def _is_valid_terminalai_board_id(board_id: Any) -> bool:
+    normalized = _normalize_board_id(board_id)
+    return normalized is not None and normalized != UNCATEGORIZED_BOARD_ID
 
 # Seconds to keep the "Hack The Planet" splash visible before continuing.
 CONNECTING_SCREEN_DURATION = 0.5
@@ -772,10 +790,26 @@ def confirm_exit():
 
 
 def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
-    board_name = board.get("name") if isinstance(board, dict) else "Board"
-    board_id = board.get("id") if isinstance(board, dict) else None
+    board_name_value = board.get("name") if isinstance(board, dict) else None
+    board_name = (
+        board_name_value.strip()
+        if isinstance(board_name_value, str) and board_name_value.strip()
+        else board_name_value
+    ) or "Board"
+
+    board_id_value = board.get("id") if isinstance(board, dict) else None
+    board_id = _normalize_board_id(board_id_value)
     if not board_id and isinstance(board, dict) and board.get("is_uncategorized"):
         board_id = UNCATEGORIZED_BOARD_ID
+
+    if (
+        board_name == TERMINALAI_BOARD_NAME
+        and not _is_valid_terminalai_board_id(board_id)
+    ):
+        print(f"{RED}{TERMINALAI_BOARD_ID_ERROR_MESSAGE}{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+
     if not board_id:
         print(f"{RED}Selected board entry is missing an id.{RESET}")
         get_input(f"{CYAN}Press Enter to return{RESET}")
@@ -1226,6 +1260,10 @@ def _invoke_generate_image(
     prompt_text = (prompt or "").strip()
     if not prompt_text:
         raise InvokeAIClientError("Prompt must not be empty")
+
+    board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+    if not _is_valid_terminalai_board_id(board_id):
+        raise InvokeAIClientError(TERMINALAI_BOARD_RESOLUTION_ERROR)
 
     negative_text = (negative_prompt or "").strip()
     scheduler_name = (scheduler or "").strip() or DEFAULT_SCHEDULER
@@ -2276,6 +2314,21 @@ def run_image_mode():
             continue
 
         client = InvokeAIClient(selected_server["ip"], port, selected_server["nickname"], DATA_DIR)
+        try:
+            board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+        except InvokeAIClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+        if not _is_valid_terminalai_board_id(board_id):
+            print(f"{RED}{TERMINALAI_BOARD_ID_ERROR_MESSAGE}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        normalized_board_id = _normalize_board_id(board_id) or board_id
+        print(
+            f"{GREEN}Images will be saved to board {TERMINALAI_BOARD_NAME} (id: {normalized_board_id}).{RESET}"
+        )
         try:
             models = client.list_models()
         except InvokeAIClientError as exc:
