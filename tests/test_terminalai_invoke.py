@@ -18,6 +18,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
     def setUp(self):
         self.client = MagicMock()
         self.client.submit_image_generation = MagicMock()
+        self.client.ensure_board = MagicMock(return_value="board-123")
         self.model = InvokeAIModel(name="model", base="sdxl", key=None, raw={})
 
     def test_invoke_generate_image_forwards_arguments(self):
@@ -49,6 +50,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             seed=123,
             board_name=TerminalAI.TERMINALAI_BOARD_NAME,
         )
+        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": "abc"})
 
     def test_invoke_generate_image_applies_defaults(self):
@@ -80,6 +82,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             seed=None,
             board_name=TerminalAI.TERMINALAI_BOARD_NAME,
         )
+        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": None})
 
     def test_invoke_generate_image_requires_prompt(self):
@@ -88,6 +91,24 @@ class TerminalAIInvokeTests(unittest.TestCase):
                 self.client,
                 self.model,
                 "   ",
+                "",
+                512,
+                512,
+                20,
+                7.0,
+                "",
+                None,
+                30,
+            )
+
+    def test_invoke_generate_image_requires_board_id(self):
+        self.client.ensure_board.return_value = ""
+
+        with self.assertRaises(TerminalAI.InvokeAIClientError):
+            TerminalAI._invoke_generate_image(
+                self.client,
+                self.model,
+                "Prompt",
                 "",
                 512,
                 512,

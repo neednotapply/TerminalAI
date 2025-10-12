@@ -1227,6 +1227,12 @@ def _invoke_generate_image(
     if not prompt_text:
         raise InvokeAIClientError("Prompt must not be empty")
 
+    board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+    if not isinstance(board_id, str) or not board_id.strip():
+        raise InvokeAIClientError(
+            f"Failed to resolve InvokeAI board '{TERMINALAI_BOARD_NAME}'"
+        )
+
     negative_text = (negative_prompt or "").strip()
     scheduler_name = (scheduler or "").strip() or DEFAULT_SCHEDULER
 
@@ -2276,6 +2282,22 @@ def run_image_mode():
             continue
 
         client = InvokeAIClient(selected_server["ip"], port, selected_server["nickname"], DATA_DIR)
+        try:
+            board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+        except InvokeAIClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+        if not isinstance(board_id, str) or not board_id.strip():
+            print(
+                f"{RED}InvokeAI server did not provide a valid id for board {TERMINALAI_BOARD_NAME}.{RESET}"
+            )
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        print(
+            f"{GREEN}Images will be saved to board {TERMINALAI_BOARD_NAME} (id: {board_id}).{RESET}"
+        )
         try:
             models = client.list_models()
         except InvokeAIClientError as exc:
