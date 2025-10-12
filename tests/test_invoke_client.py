@@ -36,7 +36,16 @@ class DummyResponse:
         self._json_data = json_data or {}
         self.status_code = status_code
         self.headers = headers or {}
-        self.content = content
+        if isinstance(content, str):
+            self.content = content.encode()
+            self._text = content
+        elif isinstance(content, (bytes, bytearray)):
+            self.content = bytes(content)
+            self._text = self.content.decode(errors="ignore")
+        else:
+            text = str(content)
+            self.content = text.encode()
+            self._text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -44,6 +53,10 @@ class DummyResponse:
 
     def json(self):
         return self._json_data
+
+    @property
+    def text(self):
+        return self._text
 
 
 TEST_SERVER_IP = "203.0.113.10"
@@ -234,6 +247,45 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
             json={"name": "TerminalAI", "board_name": "TerminalAI"},
             timeout=15,
+        )
+
+    def test_ensure_board_retries_with_query_parameter(self):
+        error_payload = {
+            "detail": [
+                {
+                    "type": "missing",
+                    "loc": ["query", "board_name"],
+                    "msg": "Field required",
+                }
+            ]
+        }
+
+        with patch.object(self.client, "_fetch_board_id", return_value=None) as mock_fetch, patch(
+            "requests.post",
+            side_effect=[
+                requests.HTTPError(response=DummyResponse(error_payload, status_code=422)),
+                DummyResponse({"id": "board-456"}),
+            ],
+        ) as mock_post:
+            board_id = self.client.ensure_board("TerminalAI")
+
+        self.assertEqual(board_id, "board-456")
+        mock_fetch.assert_called_once_with("TerminalAI")
+        self.assertEqual(
+            mock_post.call_args_list,
+            [
+                call(
+                    f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
+                    json={"name": "TerminalAI", "board_name": "TerminalAI"},
+                    timeout=15,
+                ),
+                call(
+                    f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
+                    params={"board_name": "TerminalAI"},
+                    json={"name": "TerminalAI", "board_name": "TerminalAI"},
+                    timeout=15,
+                ),
+            ],
         )
 
     def test_fetch_board_id_recovers_from_missing_all_parameter(self):
