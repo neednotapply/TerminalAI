@@ -37,7 +37,7 @@ QUEUE_ID = "default"
 ORIGIN = "terminalai"
 DESTINATION = "terminalai"
 
-UNCATEGORIZED_BOARD_ID = "UNASSIGNED"
+UNCATEGORIZED_BOARD_ID = "no-board"
 """Synthetic board id used for InvokeAI's Uncategorized images."""
 
 UNCATEGORIZED_BOARD_NAME = "Uncategorized"
@@ -2064,7 +2064,12 @@ class InvokeAIClient:
 
         if isinstance(board_id, str):
             text = board_id.strip()
-            return text or None
+            if not text:
+                return None
+            lowered = text.lower()
+            if lowered in {"none", "unassigned", "no-board"}:
+                return UNCATEGORIZED_BOARD_ID
+            return text
         if isinstance(board_id, bool):
             return None
         if isinstance(board_id, int):
