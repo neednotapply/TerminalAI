@@ -454,7 +454,18 @@ class InvokeSubmissionTests(unittest.TestCase):
                 seed=123,
             )
 
-        mock_prepare.assert_called_once()
+        mock_prepare.assert_called_once_with(
+            model=model,
+            prompt="sunrise",
+            negative_prompt="",
+            width=512,
+            height=512,
+            steps=25,
+            cfg_scale=7.0,
+            scheduler="euler",
+            seed=123,
+            board_id=None,
+        )
         mock_post.assert_called_once_with(
             f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/enqueue_batch",
             json=payload,
@@ -463,6 +474,46 @@ class InvokeSubmissionTests(unittest.TestCase):
         self.assertEqual(result["batch_id"], "batch-9")
         self.assertEqual(result["queue_item_id"], "item-77")
         self.assertEqual(result["seed"], 314)
+
+    def test_submit_image_generation_ensures_board(self):
+        model = InvokeAIModel(name="demo", base="sdxl", key=None, raw={})
+        payload = {"prepend": False, "batch": {}}
+        graph_info = {"graph": {"id": "graph-1"}, "output": "out"}
+
+        with patch.object(self.client, "ensure_board", return_value="board-99") as mock_board, patch.object(
+            self.client,
+            "_build_enqueue_payload",
+            return_value=(payload, graph_info, 101),
+        ) as mock_prepare, patch(
+            "requests.post",
+            return_value=DummyResponse({}, headers={"Location": f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/i/item-55"}),
+        ):
+            self.client.submit_image_generation(
+                model=model,
+                prompt="nebula",
+                negative_prompt="",
+                width=512,
+                height=512,
+                steps=30,
+                cfg_scale=7.5,
+                scheduler="euler",
+                seed=None,
+                board_name="TerminalAI",
+            )
+
+        mock_board.assert_called_once_with("TerminalAI")
+        mock_prepare.assert_called_once_with(
+            model=model,
+            prompt="nebula",
+            negative_prompt="",
+            width=512,
+            height=512,
+            steps=30,
+            cfg_scale=7.5,
+            scheduler="euler",
+            seed=None,
+            board_id="board-99",
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,8 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 AI_COLOR = "\033[32m"
 
+TERMINALAI_BOARD_NAME = "TerminalAI"
+
 # Seconds to keep the "Hack The Planet" splash visible before continuing.
 CONNECTING_SCREEN_DURATION = 0.5
 
@@ -1139,6 +1141,7 @@ def _invoke_generate_image(
         cfg_scale=float(cfg_scale),
         scheduler=scheduler_name,
         seed=seed,
+        board_name=TERMINALAI_BOARD_NAME,
     )
 
 
@@ -1575,9 +1578,6 @@ def select_scheduler_option(options: List[str], default_value: str) -> Optional[
             continue
         seen.add(text.lower())
         cleaned.append(text)
-
-    if cleaned:
-        print(f"{CYAN}Available schedulers: {', '.join(cleaned)}{RESET}")
 
     while True:
         entry = get_input(f"{CYAN}Scheduler [{default_value}]: {RESET}")
