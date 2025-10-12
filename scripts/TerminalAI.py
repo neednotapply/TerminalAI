@@ -816,18 +816,25 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
 
     if not _fetch_next_batch() and not entries:
         print(f"{YELLOW}No images found on board {board_name}.{RESET}")
-        print(f"{CYAN}Press Esc to return or \u2192 to refresh.{RESET}")
+        print(
+            f"{CYAN}Press Esc to return or \u2192/D to refresh.{RESET}"
+        )
         while True:
             key = get_key()
+            if key in ("d", "D"):
+                key = "RIGHT"
             if key == "ESC":
                 return
             if key == "RIGHT":
+                print(f"{CYAN}Refreshing board images...{RESET}")
                 offset = 0
                 loaded_all = False
                 if _fetch_next_batch() or entries:
                     break
                 print(f"{YELLOW}No images found on board {board_name}.{RESET}")
-                print(f"{CYAN}Press Esc to return or \u2192 to refresh.{RESET}")
+                print(
+                    f"{CYAN}Press Esc to return or \u2192/D to refresh.{RESET}"
+                )
 
     while entries:
         if index < 0:
@@ -870,9 +877,13 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
 
         while True:
             print(
-                f"{CYAN}\u2190 for previous, \u2192 for next, Enter to save, Esc to return.{RESET}"
+                f"{CYAN}\u2190/A for previous, \u2192/D for next, Enter to save, Esc to return.{RESET}"
             )
             action = get_key()
+            if action in ("a", "A"):
+                action = "LEFT"
+            elif action in ("d", "D"):
+                action = "RIGHT"
 
             if action == "ENTER":
                 if not current_path:
@@ -946,6 +957,7 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                         continue
                 if not saved:
                     _cleanup_image_result(result)
+                print(f"{CYAN}Loading next image...{RESET}")
                 index += 1
                 break
 
@@ -955,6 +967,7 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                     continue
                 if not saved:
                     _cleanup_image_result(result)
+                print(f"{CYAN}Loading previous image...{RESET}")
                 index -= 1
                 break
 
