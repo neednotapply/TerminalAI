@@ -681,6 +681,7 @@ class InvokeAIClient:
         normalized_board = board_name.strip() if isinstance(board_name, str) else ""
         if normalized_board:
             board_id = self.ensure_board(normalized_board)
+        board_label = normalized_board or None
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
             model=model,
@@ -693,6 +694,7 @@ class InvokeAIClient:
             scheduler=scheduler,
             seed=seed,
             board_id=board_id,
+            board_name=board_label,
         )
 
         enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
@@ -741,6 +743,7 @@ class InvokeAIClient:
         normalized_board = board_name.strip() if isinstance(board_name, str) else ""
         if normalized_board:
             board_id = self.ensure_board(normalized_board)
+        board_label = normalized_board or None
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
             model=model,
@@ -753,6 +756,7 @@ class InvokeAIClient:
             scheduler=scheduler,
             seed=seed,
             board_id=board_id,
+            board_name=board_label,
         )
 
         enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
@@ -843,6 +847,275 @@ class InvokeAIClient:
             item_id=item_id,
             session_id=session.get("id") if isinstance(session, dict) else None,
         )
+
+    def get_batch_status(
+        self,
+        batch_id: str,
+        *,
+        include_preview: bool = False,
+        board_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return status information about a previously enqueued batch."""
+
+        normalized = str(batch_id).strip() if batch_id is not None else ""
+        if not normalized:
+            raise InvokeAIClientError("Batch id must not be empty")
+
+        status_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/b/{normalized}/status"
+        try:
+            resp = requests.get(status_url, timeout=10)
+        except requests.RequestException as exc:
+            raise InvokeAIClientError(
+                f"Failed to query status for batch '{normalized}': {exc}"
+            ) from exc
+
+        if resp.status_code == 404:
+            raise InvokeAIClientError(f"Batch '{normalized}' was not found on the queue")
+
+        try:
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise InvokeAIClientError(
+                f"Failed to query status for batch '{normalized}': {self._summarize_http_error(exc)}"
+            ) from exc
+
+        payload = self._safe_json(resp)
+        if not isinstance(payload, dict):
+            raise InvokeAIClientError("InvokeAI batch status response was not valid JSON")
+
+        total = self._coerce_int(payload.get("total"), default=0)
+        completed = self._coerce_int(payload.get("completed"), default=0)
+        failed = self._coerce_int(payload.get("failed"), default=0)
+        pending = self._coerce_int(payload.get("pending"), default=0)
+        processing = self._coerce_int(payload.get("processing"), default=0)
+        status_value = self._coerce_str(payload.get("status"), default="").lower()
+        is_complete = bool(payload.get("is_complete"))
+
+        if failed > 0:
+            status_label = "failed"
+        elif total > 0 and completed >= total:
+            status_label = "completed"
+        elif is_complete:
+            status_label = "completed"
+        elif processing > 0:
+            status_label = "processing"
+        elif pending > 0:
+            status_label = "pending"
+        elif status_value:
+            status_label = status_value
+        else:
+            status_label = "unknown"
+
+        eta_seconds: Optional[float] = None
+        for key in (
+            "eta_seconds",
+            "eta",
+            "eta_remaining",
+            "eta_seconds_remaining",
+            "eta_total_seconds",
+        ):
+            raw_eta = payload.get(key)
+            if isinstance(raw_eta, (int, float)) and math.isfinite(raw_eta):
+                eta_seconds = float(raw_eta)
+                break
+            if isinstance(raw_eta, str):
+                text = raw_eta.strip()
+                if not text:
+                    continue
+                try:
+                    eta_seconds = float(text)
+                except ValueError:
+                    continue
+                else:
+                    break
+
+        queue_entries = self._list_queue_items_for_batch(normalized)
+        queue_items: List[Dict[str, Optional[str]]] = []
+        preview_result: Optional[Dict[str, Any]] = None
+        preview_error: Optional[str] = None
+        fallback_errors: List[str] = []
+
+        for entry in queue_entries:
+            item_value = entry.get("item_id")
+            item_id = str(item_value).strip() if item_value not in {None, ""} else None
+            entry_status = self._coerce_str(entry.get("status"), default="")
+            queue_items.append({"item_id": item_id, "status": entry_status or None})
+
+            if (
+                include_preview
+                and preview_result is None
+                and entry_status.lower() == "completed"
+            ):
+                session = entry.get("session") if isinstance(entry.get("session"), dict) else None
+                if session is None:
+                    continue
+                try:
+                    result = self._extract_image_result(session, "save_image")
+                except InvokeAIClientError as exc:
+                    preview_error = str(exc)
+                    continue
+
+                image_data: Optional[Dict[str, Any]] = None
+                image_info = result.get("image") or result.get("images")
+                if isinstance(image_info, list) and image_info:
+                    candidate = image_info[0]
+                    if isinstance(candidate, dict):
+                        image_data = candidate
+                elif isinstance(image_info, dict):
+                    image_data = image_info
+
+                if not isinstance(image_data, dict):
+                    preview_error = "Batch did not include image metadata"
+                    continue
+
+                try:
+                    preview_result = self.retrieve_board_image(
+                        image_info=image_data,
+                        board_name=board_name,
+                    )
+                except InvokeAIClientError as exc:
+                    preview_error = str(exc)
+
+        queue_item_id = None
+        for entry in queue_items:
+            if entry.get("item_id"):
+                queue_item_id = entry["item_id"]
+                break
+
+        def _normalize_identifier(value: Any) -> Optional[str]:
+            if isinstance(value, str):
+                text = value.strip()
+                return text or None
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                if isinstance(value, float) and value.is_integer():
+                    value = int(value)
+                text = str(value).strip()
+                return text or None
+            return None
+
+        def _gather_identifiers(value: Any, seen: set[int]) -> Iterable[str]:
+            if isinstance(value, dict):
+                obj_id = id(value)
+                if obj_id in seen:
+                    return
+                seen.add(obj_id)
+                keys = (
+                    "batch_id",
+                    "batchId",
+                    "batchID",
+                    "item_id",
+                    "queue_item_id",
+                    "queue_item",
+                    "queueId",
+                    "session_id",
+                    "queue",
+                )
+                for key in keys:
+                    identifier = _normalize_identifier(value.get(key))
+                    if identifier is not None:
+                        yield identifier
+                for child in value.values():
+                    yield from _gather_identifiers(child, seen)
+            elif isinstance(value, list):
+                obj_id = id(value)
+                if obj_id in seen:
+                    return
+                seen.add(obj_id)
+                for item in value:
+                    yield from _gather_identifiers(item, seen)
+
+        def _entry_matches(entry: Dict[str, Any]) -> bool:
+            identifiers = set(_gather_identifiers(entry, set()))
+            if normalized in identifiers:
+                return True
+            if queue_item_id and queue_item_id in identifiers:
+                return True
+            return False
+
+        def _select_candidate(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            matches = [entry for entry in entries if _entry_matches(entry)]
+            if matches:
+                return matches[0]
+            if len(entries) == 1:
+                return entries[0]
+            return None
+
+        if (
+            include_preview
+            and preview_result is None
+            and status_label == "completed"
+        ):
+            normalized_board_name = board_name.strip() if isinstance(board_name, str) else ""
+            board_targets: List[Tuple[Optional[str], str]] = []
+
+            if normalized_board_name:
+                try:
+                    board_identifier = self._fetch_board_id(normalized_board_name)
+                except InvokeAIClientError as exc:
+                    fallback_errors.append(str(exc))
+                    board_identifier = None
+                if board_identifier:
+                    board_targets.append((board_identifier, normalized_board_name))
+
+            if normalized_board_name.lower() != UNCATEGORIZED_BOARD_NAME.lower():
+                board_targets.append((UNCATEGORIZED_BOARD_ID, UNCATEGORIZED_BOARD_NAME))
+
+            checked_boards: set[Tuple[Optional[str], str]] = set()
+            for board_identifier, label in board_targets:
+                key = (board_identifier, label.lower())
+                if key in checked_boards:
+                    continue
+                checked_boards.add(key)
+
+                if not board_identifier:
+                    continue
+
+                try:
+                    entries = self.list_board_images(board_identifier, limit=5)
+                except InvokeAIClientError as exc:
+                    fallback_errors.append(str(exc))
+                    continue
+
+                candidate_entry = _select_candidate(entries)
+                if not candidate_entry:
+                    continue
+
+                try:
+                    preview_result = self.retrieve_board_image(
+                        image_info=candidate_entry,
+                        board_name=label,
+                    )
+                except InvokeAIClientError as exc:
+                    fallback_errors.append(str(exc))
+                    continue
+                else:
+                    preview_error = None
+                    break
+
+            if preview_result is None and not preview_error and fallback_errors:
+                preview_error = fallback_errors[0]
+
+        info: Dict[str, Any] = {
+            "batch_id": normalized,
+            "status": status_label,
+            "total": total,
+            "completed": completed,
+            "failed": failed,
+            "pending": pending,
+            "processing": processing,
+            "eta_seconds": eta_seconds,
+            "queue_items": queue_items,
+            "queue_item_id": queue_item_id,
+        }
+
+        if preview_result is not None:
+            info["preview"] = preview_result
+        elif preview_error is not None:
+            info["preview_error"] = preview_error
+
+        return info
 
     def list_boards(self) -> List[Dict[str, Any]]:
         """Return the boards available on the InvokeAI server."""
@@ -1170,6 +1443,7 @@ class InvokeAIClient:
         scheduler: str,
         seed: Optional[int],
         board_id: Optional[str],
+        board_name: Optional[str],
     ) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
         if not prompt.strip():
             raise InvokeAIClientError("Prompt must not be empty")
@@ -1186,6 +1460,7 @@ class InvokeAIClient:
             scheduler=scheduler,
             seed=seed_value,
             board_id=board_id,
+            board_name=board_name,
         )
 
         batch_payload: Dict[str, Any] = {
@@ -1198,6 +1473,8 @@ class InvokeAIClient:
             batch_payload["data"] = graph_info["data"]
         if board_id:
             batch_payload["board_id"] = board_id
+        if board_name:
+            batch_payload["board_name"] = board_name
 
         body = {
             "prepend": False,
@@ -1783,6 +2060,7 @@ class InvokeAIClient:
         scheduler: str,
         seed: int,
         board_id: Optional[str] = None,
+        board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         base = model.base.lower()
         if base in {"sd-1", "sd1", "sd-2", "sd2", "stable-diffusion-1", "stable-diffusion-2"}:
@@ -1797,6 +2075,7 @@ class InvokeAIClient:
                 scheduler,
                 seed,
                 board_id,
+                board_name,
             )
         if base in {"sdxl", "sdxl-refiner", "stable-diffusion-xl"}:
             return self._build_sdxl_graph(
@@ -1810,6 +2089,7 @@ class InvokeAIClient:
                 scheduler,
                 seed,
                 board_id,
+                board_name,
             )
         raise InvokeAIClientError(f"Unsupported InvokeAI base model: {base or 'unknown'}")
 
@@ -1825,6 +2105,7 @@ class InvokeAIClient:
         scheduler: str,
         seed: int,
         board_id: Optional[str] = None,
+        board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         graph_id = "terminal_sd_graph"
         clip_skip_layers = model_cfg.get("clip_skip", 0)
@@ -1877,6 +2158,8 @@ class InvokeAIClient:
 
         if board_id:
             nodes["save_image"]["board_id"] = board_id
+        if board_name:
+            nodes["save_image"]["board_name"] = board_name
 
         edges: List[Dict[str, Dict[str, str]]] = []
         if use_clip_skip:
@@ -2100,6 +2383,7 @@ class InvokeAIClient:
         scheduler: str,
         seed: int,
         board_id: Optional[str] = None,
+        board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         graph_id = "terminal_sdxl_graph"
         nodes: Dict[str, Dict[str, Any]] = {
@@ -2163,6 +2447,8 @@ class InvokeAIClient:
 
         if board_id:
             nodes["save_image"]["board_id"] = board_id
+        if board_name:
+            nodes["save_image"]["board_name"] = board_name
 
         edges = [
             {

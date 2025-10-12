@@ -1021,6 +1021,88 @@ def _view_server_boards(client: InvokeAIClient) -> None:
         clear_screen()
 
 
+def _check_batch_status(client: InvokeAIClient) -> None:
+    while True:
+        batch_id = get_input(f"{CYAN}Batch id (ESC to cancel): {RESET}")
+        if batch_id == "ESC":
+            return
+        batch_id = batch_id.strip()
+        if not batch_id:
+            print(f"{RED}Batch id cannot be empty{RESET}")
+            continue
+
+        try:
+            status = client.get_batch_status(
+                batch_id,
+                include_preview=True,
+                board_name=TERMINALAI_BOARD_NAME,
+            )
+        except InvokeAIClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to try another batch id{RESET}")
+            return
+        except requests.RequestException as exc:
+            print(f"{RED}Network error: {exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to try another batch id{RESET}")
+            return
+
+        print(f"{GREEN}Batch {batch_id} status: {status.get('status', 'unknown').title()}{RESET}")
+
+        total = status.get("total") or 0
+        completed = status.get("completed") or 0
+        processing = status.get("processing") or 0
+        pending = status.get("pending") or 0
+        failed = status.get("failed") or 0
+        print(f"{CYAN}Progress:{RESET} {completed}/{total} complete")
+        if processing:
+            print(f"{CYAN}Processing:{RESET} {processing}")
+        if pending:
+            print(f"{CYAN}Waiting in queue:{RESET} {pending}")
+        if failed:
+            print(f"{YELLOW}Failed items in batch:{RESET} {failed}")
+
+        queue_item_id = status.get("queue_item_id")
+        if queue_item_id:
+            print(f"{CYAN}Queue item id:{RESET} {queue_item_id}")
+
+        queue_items = status.get("queue_items")
+        if isinstance(queue_items, list) and len(queue_items) > 1:
+            print(f"{CYAN}Queue entries:{RESET}")
+            for entry in queue_items:
+                item_label = entry.get("item_id") or "(unknown)"
+                entry_status = entry.get("status") or "unknown"
+                print(f"  - {item_label}: {entry_status}")
+
+        eta_seconds = status.get("eta_seconds")
+        if isinstance(eta_seconds, (int, float)) and eta_seconds > 0:
+            eta_delta = datetime.timedelta(seconds=int(eta_seconds))
+            print(f"{CYAN}Estimated wait:{RESET} ~{eta_delta}")
+
+        preview = status.get("preview") if isinstance(status, dict) else None
+        preview_error = status.get("preview_error") if isinstance(status, dict) else None
+
+        if isinstance(preview, dict):
+            path_value = preview.get("path")
+            metadata = preview.get("metadata") if isinstance(preview.get("metadata"), dict) else {}
+            if path_value:
+                print(f"{CYAN}Preview saved to {path_value}{RESET}")
+            if metadata:
+                _print_board_image_summary(metadata)
+            if path_value:
+                display_with_chafa(path_value)
+            get_input(f"{CYAN}Press Enter to return to the InvokeAI menu{RESET}")
+            _cleanup_image_result(preview)
+            return
+
+        if preview_error:
+            print(f"{YELLOW}Preview unavailable: {preview_error}{RESET}")
+        else:
+            print(f"{YELLOW}Preview not available yet. The batch is still processing.{RESET}")
+
+        get_input(f"{CYAN}Press Enter to return to the InvokeAI menu{RESET}")
+        return
+
+
 def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) -> None:
     if not models:
         print(f"{RED}No InvokeAI models reported by this server{RESET}")
@@ -2240,7 +2322,7 @@ def run_image_mode():
             clear_screen()
 
         while True:
-            options = ["View Boards", "Generate Images", "[Back]"]
+            options = ["View Boards", "Generate Images", "Check Batch Status", "[Back]"]
             header = f"InvokeAI on {client.nickname}:"
             choice = interactive_menu(header, options)
             if choice is None or choice == len(options) - 1:
@@ -2254,6 +2336,12 @@ def run_image_mode():
                 clear_screen()
                 _run_generation_flow(client, models)
                 clear_screen()
+                continue
+            if choice == 2:
+                clear_screen()
+                _check_batch_status(client)
+                clear_screen()
+                continue
 
 
 # Main loop
