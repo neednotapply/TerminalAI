@@ -231,10 +231,12 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             scheduler="euler",
             seed=101,
             board_id="board-123",
+            board_name="TerminalAI",
         )
 
         nodes = info["graph"]["nodes"]
         self.assertEqual(nodes["save_image"].get("board_id"), "board-123")
+        self.assertEqual(nodes["save_image"].get("board_name"), "TerminalAI")
         self.assertIn(
             {
                 "source": {"node_id": "latents_to_image", "field": "image"},
@@ -242,6 +244,207 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             },
             info["graph"]["edges"],
         )
+
+
+class InvokeClientBatchStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.client = InvokeAIClient(TEST_SERVER_IP, 9090, data_dir=Path(self.tmpdir.name))
+
+    def test_get_batch_status_completed_with_preview(self):
+        batch_id = "batch-123"
+        status_url = (
+            f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/b/{batch_id}/status"
+        )
+        list_url = f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/list_all"
+        image_name = "image-abc.png"
+        status_payload = {
+            "total": 1,
+            "completed": 1,
+            "failed": 0,
+            "pending": 0,
+            "processing": 0,
+            "status": "completed",
+        }
+        queue_entry = {
+            "item_id": "item-789",
+            "status": "completed",
+            "batch_id": batch_id,
+            "session": {
+                "results": {
+                    "save_image": {
+                        "image": {
+                            "image_name": image_name,
+                            "metadata": {
+                                "prompt": "test prompt",
+                                "negative_prompt": "",
+                                "width": 512,
+                                "height": 512,
+                                "steps": 20,
+                                "cfg_scale": 7.5,
+                                "seed": 42,
+                                "scheduler": "euler",
+                                "model": {"name": "model", "base": "sd-1"},
+                            },
+                        }
+                    }
+                },
+                "source_prepared_mapping": {},
+            },
+        }
+        image_content = b"fake-image-bytes"
+
+        def fake_get(url, *args, **kwargs):
+            if url == status_url:
+                return DummyResponse(status_payload)
+            if url == list_url:
+                return DummyResponse([queue_entry])
+            if url == f"http://{TEST_SERVER_IP}:9090/api/v1/images/i/{image_name}/full":
+                return DummyResponse(content=image_content)
+            raise AssertionError(f"Unexpected GET {url}")
+
+        with patch("requests.get", side_effect=fake_get):
+            status = self.client.get_batch_status(batch_id, include_preview=True)
+
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["completed"], 1)
+        self.assertEqual(status["queue_item_id"], "item-789")
+        self.assertIn("preview", status)
+        preview = status["preview"]
+        self.assertTrue(Path(preview["path"]).exists())
+        with Path(preview["path"]).open("rb") as fh:
+            self.assertEqual(fh.read(), image_content)
+        metadata = preview.get("metadata", {})
+        self.assertEqual(metadata.get("prompt"), "test prompt")
+
+    def test_get_batch_status_pending_without_preview(self):
+        batch_id = "batch-456"
+        status_url = (
+            f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/b/{batch_id}/status"
+        )
+        list_url = f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/list_all"
+        status_payload = {
+            "total": 1,
+            "completed": 0,
+            "failed": 0,
+            "pending": 1,
+            "processing": 0,
+            "status": "pending",
+            "eta_seconds": "12.5",
+        }
+        queue_entry = {"item_id": "item-123", "status": "pending", "batch_id": batch_id}
+
+        def fake_get(url, *args, **kwargs):
+            if url == status_url:
+                return DummyResponse(status_payload)
+            if url == list_url:
+                return DummyResponse([queue_entry])
+            raise AssertionError(f"Unexpected GET {url}")
+
+        with patch("requests.get", side_effect=fake_get):
+            status = self.client.get_batch_status(batch_id, include_preview=True)
+
+        self.assertEqual(status["status"], "pending")
+        self.assertNotIn("preview", status)
+        self.assertEqual(status.get("queue_item_id"), "item-123")
+        self.assertEqual(status.get("eta_seconds"), 12.5)
+        self.assertEqual(status.get("pending"), 1)
+        self.assertIsNone(status.get("preview_error"))
+
+    def test_get_batch_status_completed_uses_board_fallback(self):
+        batch_id = "batch-fallback"
+        status_url = (
+            f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/b/{batch_id}/status"
+        )
+        list_url = f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/list_all"
+        boards_url = f"http://{TEST_SERVER_IP}:9090/api/v1/boards/"
+        images_url = f"http://{TEST_SERVER_IP}:9090/api/v1/images/"
+        image_name = "fallback-image.png"
+
+        status_payload = {
+            "total": 1,
+            "completed": 1,
+            "failed": 0,
+            "pending": 0,
+            "processing": 0,
+            "status": "completed",
+        }
+        queue_entry = {"item_id": "queue-1", "status": "completed", "batch_id": batch_id}
+        board_entry = {"board_id": "board-1", "board_name": "TerminalAI"}
+        board_image = {
+            "image_name": image_name,
+            "batch_id": batch_id,
+            "metadata": {
+                "prompt": "board prompt",
+                "negative_prompt": "",
+                "width": 512,
+                "height": 512,
+                "steps": 20,
+                "cfg_scale": 7.5,
+                "scheduler": "euler",
+                "seed": 99,
+                "model": {"name": "model", "base": "sd-1"},
+                "batch_id": batch_id,
+            },
+        }
+        image_content = b"fallback-image-content"
+
+        def fake_get(url, *args, **kwargs):
+            if url == status_url:
+                return DummyResponse(status_payload)
+            if url == list_url:
+                return DummyResponse([queue_entry])
+            if url == boards_url:
+                params = kwargs.get("params")
+                if params == {"all": True}:
+                    return DummyResponse({"items": [board_entry]})
+                raise AssertionError(f"Unexpected board params: {params}")
+            if url == images_url:
+                params = kwargs.get("params") or {}
+                expected_params = {
+                    "limit": 5,
+                    "offset": 0,
+                    "order_dir": "DESC",
+                    "starred_first": "false",
+                    "board_id": "board-1",
+                }
+                if params == expected_params:
+                    return DummyResponse({"items": [board_image]})
+                raise AssertionError(f"Unexpected image params: {params}")
+            if url == f"http://{TEST_SERVER_IP}:9090/api/v1/images/i/{image_name}/full":
+                return DummyResponse(content=image_content)
+            raise AssertionError(f"Unexpected GET {url}")
+
+        with patch("requests.get", side_effect=fake_get):
+            status = self.client.get_batch_status(
+                batch_id,
+                include_preview=True,
+                board_name="TerminalAI",
+            )
+
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status.get("queue_item_id"), "queue-1")
+        self.assertIn("preview", status)
+        preview = status["preview"]
+        self.assertTrue(Path(preview["path"]).exists())
+        with Path(preview["path"]).open("rb") as fh:
+            self.assertEqual(fh.read(), image_content)
+        metadata = preview.get("metadata", {})
+        self.assertEqual(metadata.get("prompt"), "board prompt")
+        self.assertEqual(metadata.get("image", {}).get("batch_id"), batch_id)
+
+    def test_get_batch_status_missing_batch_raises(self):
+        batch_id = "missing"
+        status_url = (
+            f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/b/{batch_id}/status"
+        )
+
+        with patch("requests.get", return_value=DummyResponse(status_code=404)) as mock_get:
+            with self.assertRaises(InvokeAIClientError):
+                self.client.get_batch_status(batch_id)
+
+        mock_get.assert_called_once_with(status_url, timeout=10)
 
 
 class InvokeSchedulerDiscoveryTests(unittest.TestCase):
@@ -669,6 +872,7 @@ class InvokeSubmissionTests(unittest.TestCase):
             scheduler="euler",
             seed=123,
             board_id=None,
+            board_name=None,
         )
         mock_post.assert_called_once_with(
             f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/enqueue_batch",
@@ -717,6 +921,7 @@ class InvokeSubmissionTests(unittest.TestCase):
             scheduler="euler",
             seed=None,
             board_id="board-99",
+            board_name="TerminalAI",
         )
 
 if __name__ == "__main__":
