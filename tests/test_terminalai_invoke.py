@@ -47,6 +47,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=6.5,
             scheduler="custom_scheduler",
             seed=123,
+            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
         )
         self.assertEqual(result, {"queue_item_id": "abc"})
 
@@ -77,6 +78,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=7.5,
             scheduler=TerminalAI.DEFAULT_SCHEDULER,
             seed=None,
+            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
         )
         self.assertEqual(result, {"queue_item_id": None})
 

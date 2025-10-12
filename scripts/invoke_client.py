@@ -646,8 +646,14 @@ class InvokeAIClient:
         cfg_scale: float = DEFAULT_CFG_SCALE,
         scheduler: str = DEFAULT_SCHEDULER,
         seed: Optional[int] = None,
+        board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit a generation request and return queue identifiers."""
+
+        board_id: Optional[str] = None
+        normalized_board = board_name.strip() if isinstance(board_name, str) else ""
+        if normalized_board:
+            board_id = self.ensure_board(normalized_board)
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
             model=model,
@@ -659,6 +665,7 @@ class InvokeAIClient:
             cfg_scale=cfg_scale,
             scheduler=scheduler,
             seed=seed,
+            board_id=board_id,
         )
 
         enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
@@ -699,8 +706,14 @@ class InvokeAIClient:
         scheduler: str = DEFAULT_SCHEDULER,
         seed: Optional[int] = None,
         timeout: float = 180.0,
+        board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate an image and return metadata about the result."""
+
+        board_id: Optional[str] = None
+        normalized_board = board_name.strip() if isinstance(board_name, str) else ""
+        if normalized_board:
+            board_id = self.ensure_board(normalized_board)
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
             model=model,
@@ -712,6 +725,7 @@ class InvokeAIClient:
             cfg_scale=cfg_scale,
             scheduler=scheduler,
             seed=seed,
+            board_id=board_id,
         )
 
         enqueue_url = f"{self.base_url}/api/v1/queue/{QUEUE_ID}/enqueue_batch"
@@ -748,8 +762,9 @@ class InvokeAIClient:
                 if batch_session_info is not None:
                     item_id, session = batch_session_info
             if session is None:
+                fallback_board = normalized_board or "Auto"
                 fallback_image = self._wait_for_board_image(
-                    board_name="Auto",
+                    board_name=fallback_board,
                     enqueue_started=enqueue_started,
                     timeout=timeout,
                 )
@@ -872,6 +887,55 @@ class InvokeAIClient:
 
         boards.sort(key=lambda value: value.get("name", "").lower())
         return boards
+
+    def ensure_board(self, board_name: str) -> Optional[str]:
+        """Ensure a board exists on the server and return its identifier."""
+
+        normalized = board_name.strip() if isinstance(board_name, str) else ""
+        if not normalized:
+            return None
+
+        existing_id = self._fetch_board_id(normalized)
+        if existing_id:
+            return existing_id
+
+        boards_url = f"{self.base_url}/api/v1/boards/"
+        payload = {"name": normalized}
+        try:
+            resp = requests.post(boards_url, json=payload, timeout=15)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise InvokeAIClientError(
+                f"Failed to create board '{normalized}': {exc}"
+            ) from exc
+
+        data = self._safe_json(resp)
+        board_id: Optional[str] = None
+        if isinstance(data, dict):
+            for key in ("id", "board_id"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    board_id = value.strip()
+                    break
+            if board_id is None:
+                nested = data.get("board") if isinstance(data.get("board"), dict) else None
+                if isinstance(nested, dict):
+                    for key in ("id", "board_id"):
+                        value = nested.get(key)
+                        if isinstance(value, str) and value.strip():
+                            board_id = value.strip()
+                            break
+
+        if board_id:
+            return board_id
+
+        fetched = self._fetch_board_id(normalized)
+        if fetched:
+            return fetched
+
+        raise InvokeAIClientError(
+            f"InvokeAI server did not report an id for board '{normalized}'"
+        )
 
     def list_board_images(
         self,
@@ -1020,6 +1084,7 @@ class InvokeAIClient:
         cfg_scale: float,
         scheduler: str,
         seed: Optional[int],
+        board_id: Optional[str],
     ) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
         if not prompt.strip():
             raise InvokeAIClientError("Prompt must not be empty")
@@ -1045,6 +1110,8 @@ class InvokeAIClient:
         }
         if graph_info.get("data") is not None:
             batch_payload["data"] = graph_info["data"]
+        if board_id:
+            batch_payload["board_id"] = board_id
 
         body = {
             "prepend": False,
