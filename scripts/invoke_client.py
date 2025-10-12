@@ -1876,7 +1876,7 @@ class InvokeAIClient:
         }
 
         if board_id:
-            nodes["save_image"]["board"] = board_id
+            nodes["save_image"]["board_id"] = board_id
 
         edges: List[Dict[str, Dict[str, str]]] = []
         if use_clip_skip:
@@ -2162,7 +2162,7 @@ class InvokeAIClient:
         }
 
         if board_id:
-            nodes["save_image"]["board"] = board_id
+            nodes["save_image"]["board_id"] = board_id
 
         edges = [
             {
