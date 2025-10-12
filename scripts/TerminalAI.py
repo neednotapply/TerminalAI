@@ -21,6 +21,7 @@ from invoke_client import (
     DEFAULT_SCHEDULER,
     DEFAULT_STEPS,
     DEFAULT_WIDTH,
+    UNCATEGORIZED_BOARD_ID,
     InvokeAIClient,
     InvokeAIClientError,
     InvokeAIModel,
@@ -712,6 +713,26 @@ def _cleanup_image_result(result):
             pass
 
 
+def _sanitize_filename(candidate: str) -> str:
+    """Return a filesystem-friendly version of ``candidate``."""
+
+    if not isinstance(candidate, str):
+        return ""
+    sanitized = re.sub(r"[^0-9A-Za-z._-]+", "_", candidate.strip())
+    return sanitized.strip("._")
+
+
+def _resolve_unique_path(path: Path) -> Path:
+    """Return ``path`` or a variant with a numeric suffix that does not exist."""
+
+    candidate = path
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}_{counter}{path.suffix}")
+        counter += 1
+    return candidate
+
+
 def _print_board_image_summary(metadata: Dict[str, Any]) -> None:
     prompt = metadata.get("prompt") if isinstance(metadata, dict) else None
     negative = metadata.get("negative_prompt") if isinstance(metadata, dict) else None
@@ -747,81 +768,200 @@ def confirm_exit():
 def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
     board_name = board.get("name") if isinstance(board, dict) else "Board"
     board_id = board.get("id") if isinstance(board, dict) else None
+    if not board_id and isinstance(board, dict) and board.get("is_uncategorized"):
+        board_id = UNCATEGORIZED_BOARD_ID
     if not board_id:
         print(f"{RED}Selected board entry is missing an id.{RESET}")
         get_input(f"{CYAN}Press Enter to return{RESET}")
         return
 
-    offset = 0
     page_size = 5
+    entries: List[Dict[str, Any]] = []
+    offset = 0
+    loaded_all = False
+    index = 0
 
-    while True:
+    def _fetch_next_batch(*, interactive: bool = True) -> bool:
+        nonlocal offset, loaded_all, entries
+        if loaded_all:
+            return False
         try:
-            images = client.list_board_images(board_id, limit=page_size, offset=offset)
+            batch = client.list_board_images(board_id, limit=page_size, offset=offset)
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
-            get_input(f"{CYAN}Press Enter to return{RESET}")
-            return
+            if interactive:
+                get_input(f"{CYAN}Press Enter to return{RESET}")
+            return False
         except requests.RequestException as exc:
             print(f"{RED}Failed to retrieve board images: {exc}{RESET}")
-            get_input(f"{CYAN}Press Enter to return{RESET}")
-            return
+            if interactive:
+                get_input(f"{CYAN}Press Enter to return{RESET}")
+            return False
 
-        if not images:
-            if offset == 0:
-                print(f"{YELLOW}No images found on board {board_name}.{RESET}")
-            else:
-                print(f"{YELLOW}No additional images found on board {board_name}.{RESET}")
-            resp = get_input(
-                f"{CYAN}Press Enter to refresh or type 'back' to return: {RESET}"
-            )
-            if resp == "ESC" or resp.strip().lower() == "back":
+        if not batch:
+            loaded_all = True
+            return False
+
+        entries.extend(batch)
+        offset += len(batch)
+        if len(batch) < page_size:
+            loaded_all = True
+        return True
+
+    if not _fetch_next_batch() and not entries:
+        print(f"{YELLOW}No images found on board {board_name}.{RESET}")
+        print(f"{CYAN}Press Esc to return or \u2192 to refresh.{RESET}")
+        while True:
+            key = get_key()
+            if key == "ESC":
                 return
-            offset = 0
+            if key == "RIGHT":
+                offset = 0
+                loaded_all = False
+                if _fetch_next_batch() or entries:
+                    break
+                print(f"{YELLOW}No images found on board {board_name}.{RESET}")
+                print(f"{CYAN}Press Esc to return or \u2192 to refresh.{RESET}")
+
+    while entries:
+        if index < 0:
+            index = 0
+        if index >= len(entries):
+            index = len(entries) - 1
+
+        entry = entries[index]
+        try:
+            result = client.retrieve_board_image(image_info=entry, board_name=board_name)
+        except InvokeAIClientError as exc:
+            print(f"{YELLOW}Skipping image: {exc}{RESET}")
+            entries.pop(index)
+            if not entries:
+                break
+            if index >= len(entries):
+                index = len(entries) - 1
+            continue
+        except requests.RequestException as exc:
+            print(f"{YELLOW}Failed to download image: {exc}{RESET}")
+            entries.pop(index)
+            if not entries:
+                break
+            if index >= len(entries):
+                index = len(entries) - 1
             continue
 
-        for entry in images:
-            try:
-                result = client.retrieve_board_image(image_info=entry, board_name=board_name)
-            except InvokeAIClientError as exc:
-                print(f"{YELLOW}Skipping image: {exc}{RESET}")
-                continue
-            except requests.RequestException as exc:
-                print(f"{YELLOW}Failed to download image: {exc}{RESET}")
-                continue
+        path_value = result.get("path") if isinstance(result, dict) else None
+        metadata = result.get("metadata") if isinstance(result, dict) else {}
+        if path_value:
+            print(f"{CYAN}Preview saved to {path_value}{RESET}")
+        if isinstance(metadata, dict):
+            _print_board_image_summary(metadata)
+        if path_value:
+            display_with_chafa(path_value)
 
-            path = result.get("path") if isinstance(result, dict) else None
-            metadata = result.get("metadata") if isinstance(result, dict) else {}
-            if path:
-                print(f"{CYAN}Preview saved to {path}{RESET}")
-            if isinstance(metadata, dict):
-                _print_board_image_summary(metadata)
-            if path:
-                display_with_chafa(path)
+        saved = False
+        current_path = Path(path_value) if path_value else None
+        metadata_path_value = result.get("metadata_path") if isinstance(result, dict) else None
 
-            saved = False
-            while True:
-                action = get_input(
-                    f"{CYAN}Press Enter for next image, type 'save' to keep, or 'back' to return: {RESET}"
-                )
-                if action == "ESC" or action.strip().lower() == "back":
-                    if not saved:
-                        _cleanup_image_result(result)
-                    return
-                if action.strip().lower() == "save":
-                    saved = True
-                    if path:
-                        print(f"{GREEN}Image retained at {path}{RESET}")
-                    meta_path = result.get("metadata_path") if isinstance(result, dict) else None
-                    if meta_path:
-                        print(f"{CYAN}Metadata saved to {meta_path}{RESET}")
+        while True:
+            print(
+                f"{CYAN}\u2190 for previous, \u2192 for next, Enter to save, Esc to return.{RESET}"
+            )
+            action = get_key()
+
+            if action == "ENTER":
+                if not current_path:
+                    print(f"{YELLOW}No preview available to save.{RESET}")
                     continue
 
+                default_name = None
+                prompt_value = metadata.get("prompt") if isinstance(metadata, dict) else None
+                if isinstance(prompt_value, str) and prompt_value.strip():
+                    default_name = prompt_value.strip().splitlines()[0]
+                    if len(default_name) > 80:
+                        default_name = default_name[:80].rstrip() + "\u2026"
+
+                suggested = _sanitize_filename(default_name) if default_name else ""
+                fallback = current_path.stem
+                prompt_text = (
+                    f"{CYAN}Save image as [{suggested or fallback}]: {RESET}"
+                )
+                response = get_input(prompt_text)
+                if response == "ESC":
+                    continue
+                final_name = response.strip() or default_name or fallback
+                sanitized = _sanitize_filename(final_name)
+                if not sanitized:
+                    sanitized = fallback
+
+                target_path = current_path.with_name(f"{sanitized}{current_path.suffix}")
+                if target_path != current_path:
+                    target_path = _resolve_unique_path(target_path)
+                    try:
+                        current_path.rename(target_path)
+                        print(f"{GREEN}Image saved to {target_path}{RESET}")
+                        current_path = target_path
+                        if isinstance(result, dict):
+                            result["path"] = str(target_path)
+                    except OSError as exc:
+                        print(f"{YELLOW}Failed to rename image: {exc}{RESET}")
+                else:
+                    print(f"{GREEN}Image retained at {current_path}{RESET}")
+
+                if metadata_path_value:
+                    meta_path = Path(metadata_path_value)
+                    target_meta = meta_path.with_name(f"{current_path.stem}{meta_path.suffix}")
+                    if target_meta != meta_path:
+                        target_meta = _resolve_unique_path(target_meta)
+                        try:
+                            meta_path.rename(target_meta)
+                            metadata_path_value = str(target_meta)
+                            if isinstance(result, dict):
+                                result["metadata_path"] = str(target_meta)
+                        except OSError as exc:
+                            print(f"{YELLOW}Failed to rename metadata file: {exc}{RESET}")
+                saved = True
+                continue
+
+            if action == "RIGHT":
+                if index == len(entries) - 1:
+                    if not loaded_all:
+                        if not _fetch_next_batch(interactive=False):
+                            if loaded_all:
+                                print(
+                                    f"{YELLOW}Already viewing the newest image on this board.{RESET}"
+                                )
+                            else:
+                                print(
+                                    f"{YELLOW}Unable to load additional images for this board right now.{RESET}"
+                                )
+                            continue
+                    else:
+                        print(f"{YELLOW}Already viewing the newest image on this board.{RESET}")
+                        continue
                 if not saved:
                     _cleanup_image_result(result)
+                index += 1
                 break
 
-        offset += len(images)
+            if action == "LEFT":
+                if index == 0:
+                    print(f"{YELLOW}Already viewing the oldest image loaded for this board.{RESET}")
+                    continue
+                if not saved:
+                    _cleanup_image_result(result)
+                index -= 1
+                break
+
+            if action == "ESC":
+                if not saved:
+                    _cleanup_image_result(result)
+                return
+
+        # end of inner loop
+
+    if not entries:
+        print(f"{YELLOW}No images remain on board {board_name}.{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
 
 
 def _view_server_boards(client: InvokeAIClient) -> None:

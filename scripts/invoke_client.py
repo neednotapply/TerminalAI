@@ -36,6 +36,12 @@ QUEUE_ID = "default"
 ORIGIN = "terminalai"
 DESTINATION = "terminalai"
 
+UNCATEGORIZED_BOARD_ID = "UNASSIGNED"
+"""Synthetic board id used for InvokeAI's Uncategorized images."""
+
+UNCATEGORIZED_BOARD_NAME = "Uncategorized"
+"""Human readable name for InvokeAI's Uncategorized images."""
+
 
 def _build_static_model_endpoints() -> List[Tuple[str, Optional[Dict[str, Any]]]]:
     """Return a deduplicated list of known InvokeAI model endpoints."""
@@ -816,22 +822,53 @@ class InvokeAIClient:
             candidates = []
 
         boards: List[Dict[str, Any]] = []
+        uncategorized_seen = False
         for entry in candidates:
             if not isinstance(entry, dict):
                 continue
             board_id = entry.get("board_id") or entry.get("id")
             name = entry.get("board_name") or entry.get("name")
-            if not isinstance(board_id, str) or not board_id.strip():
+            if isinstance(board_id, str) and board_id.strip():
+                normalized_id = board_id.strip()
+            else:
+                normalized_id = None
+
+            normalized_name = name.strip() if isinstance(name, str) else ""
+            is_uncategorized = False
+            if normalized_id:
+                is_uncategorized = normalized_id.lower() == UNCATEGORIZED_BOARD_ID.lower()
+            if not is_uncategorized and normalized_name:
+                is_uncategorized = normalized_name.lower() == UNCATEGORIZED_BOARD_NAME.lower()
+
+            if is_uncategorized:
+                normalized_id = UNCATEGORIZED_BOARD_ID
+                normalized_name = UNCATEGORIZED_BOARD_NAME
+                uncategorized_seen = True
+
+            if not normalized_id:
+                # Skip unknown entries, but keep tracking uncategorized separately.
                 continue
-            display_name = name if isinstance(name, str) and name.strip() else board_id
+
+            display_name = normalized_name if normalized_name else normalized_id
             info: Dict[str, Any] = {
-                "id": board_id,
+                "id": normalized_id,
                 "name": display_name,
             }
             count = entry.get("image_count") or entry.get("count")
             if isinstance(count, (int, float)):
                 info["count"] = int(count)
+            if is_uncategorized:
+                info["is_uncategorized"] = True
             boards.append(info)
+
+        if not uncategorized_seen:
+            boards.append(
+                {
+                    "id": UNCATEGORIZED_BOARD_ID,
+                    "name": UNCATEGORIZED_BOARD_NAME,
+                    "is_uncategorized": True,
+                }
+            )
 
         boards.sort(key=lambda value: value.get("name", "").lower())
         return boards
@@ -845,16 +882,20 @@ class InvokeAIClient:
     ) -> List[Dict[str, Any]]:
         """Return the newest images for a board."""
 
-        if not board_id:
-            return []
-
         params: Dict[str, Any] = {
-            "board_id": board_id,
             "limit": max(1, int(limit)),
             "offset": max(0, int(offset)),
             "order_dir": "DESC",
             "starred_first": "false",
         }
+
+        if board_id == UNCATEGORIZED_BOARD_ID:
+            params["board_id"] = UNCATEGORIZED_BOARD_ID
+            params["include_unassigned"] = "true"
+        else:
+            if not board_id:
+                return []
+            params["board_id"] = board_id
 
         images_url = f"{self.base_url}/api/v1/images/"
         try:
