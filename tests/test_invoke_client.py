@@ -160,7 +160,8 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             },
             graph["edges"],
         )
-        self.assertEqual(info["output"], "latents_to_image")
+        self.assertIn("save_image", graph["nodes"])
+        self.assertEqual(info["output"], "save_image")
         self.assertIsNone(info["data"])
 
     def test_build_sdxl_graph_structure(self):
@@ -201,8 +202,46 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             },
             graph["edges"],
         )
-        self.assertEqual(info["output"], "latents_to_image")
+        self.assertIn("save_image", nodes)
+        self.assertEqual(info["output"], "save_image")
         self.assertIsNone(info["data"])
+
+    def test_build_graph_attaches_board_to_save_node(self):
+        model = InvokeAIModel(
+            name="test-sdxl",
+            base="sdxl",
+            key="sdxl-key",
+            raw={
+                "key": "sdxl-key",
+                "hash": "hash",
+                "name": "SDXL Model",
+                "base": "sdxl",
+                "type": "main",
+            },
+        )
+
+        info = self.client._build_graph(
+            model=model,
+            prompt="galaxy horizon",
+            negative_prompt="",
+            width=1024,
+            height=1024,
+            steps=30,
+            cfg_scale=7.0,
+            scheduler="euler",
+            seed=101,
+            board_id="board-123",
+        )
+
+        nodes = info["graph"]["nodes"]
+        self.assertEqual(nodes["save_image"].get("board"), "board-123")
+        self.assertIn(
+            {
+                "source": {"node_id": "latents_to_image", "field": "image"},
+                "destination": {"node_id": "save_image", "field": "image"},
+            },
+            info["graph"]["edges"],
+        )
 
 
 class InvokeSchedulerDiscoveryTests(unittest.TestCase):
@@ -288,6 +327,21 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             ],
         )
 
+    def test_ensure_board_handles_numeric_ids(self):
+        with patch.object(self.client, "_fetch_board_id", return_value=None) as mock_fetch, patch(
+            "requests.post",
+            return_value=DummyResponse({"id": 314}),
+        ) as mock_post:
+            board_id = self.client.ensure_board("TerminalAI")
+
+        self.assertEqual(board_id, "314")
+        mock_fetch.assert_called_once_with("TerminalAI")
+        mock_post.assert_called_once_with(
+            f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
+            json={"name": "TerminalAI", "board_name": "TerminalAI"},
+            timeout=15,
+        )
+
     def test_fetch_board_id_recovers_from_missing_all_parameter(self):
         attempts: list[Optional[Dict[str, Any]]] = []
 
@@ -323,6 +377,29 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(mock_get.call_count, 3)
+
+    def test_fetch_board_id_allows_numeric_ids(self):
+        payload = {"items": [{"board_id": 99, "board_name": "TerminalAI"}]}
+
+        with patch.object(self.client, "_fetch_boards_payload", return_value=payload) as mock_payload:
+            board_id = self.client._fetch_board_id("TerminalAI")
+
+        self.assertEqual(board_id, "99")
+        mock_payload.assert_called_once_with(strict=False)
+
+    def test_list_boards_includes_numeric_ids(self):
+        payload = [
+            {"board_id": 77, "board_name": "TerminalAI", "image_count": 5},
+            {"board_id": "UNASSIGNED", "board_name": "Uncategorized"},
+        ]
+
+        with patch.object(self.client, "_fetch_boards_payload", return_value=payload):
+            boards = self.client.list_boards()
+
+        board_names = {entry["name"]: entry for entry in boards}
+        self.assertIn("TerminalAI", board_names)
+        self.assertEqual(board_names["TerminalAI"]["id"], "77")
+        self.assertEqual(board_names["TerminalAI"].get("count"), 5)
 
     def test_list_schedulers_prefers_metadata(self):
         metadata_payload = {

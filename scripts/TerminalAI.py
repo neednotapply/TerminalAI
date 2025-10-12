@@ -508,6 +508,10 @@ def get_key():
                     return "UP"
                 if ch2 == "P":
                     return "DOWN"
+                if ch2 == "M":
+                    return "RIGHT"
+                if ch2 == "K":
+                    return "LEFT"
                 continue
             if ch == "\x1b":
                 return "ESC"
