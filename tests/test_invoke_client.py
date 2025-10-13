@@ -162,6 +162,22 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             graph["edges"],
         )
         self.assertIn("save_image", graph["nodes"])
+        metadata = graph["nodes"]["save_image"].get("metadata")
+        self.assertIsInstance(metadata, dict)
+        self.assertEqual(metadata.get("prompt"), "a sunrise over the ocean")
+        self.assertEqual(metadata.get("negative_prompt"), "blurry")
+        self.assertEqual(metadata.get("seed"), 123)
+        self.assertEqual(metadata.get("width"), 512)
+        self.assertEqual(metadata.get("height"), 512)
+        self.assertEqual(metadata.get("steps"), 20)
+        self.assertEqual(metadata.get("cfg_scale"), 7.5)
+        self.assertEqual(metadata.get("scheduler"), "dpmpp_2m")
+        model_metadata = metadata.get("model")
+        self.assertEqual(model_metadata.get("key"), "model-key")
+        self.assertEqual(model_metadata.get("hash"), "hash")
+        self.assertEqual(model_metadata.get("name"), "Test Model")
+        self.assertEqual(model_metadata.get("base"), "sd-1")
+        self.assertEqual(model_metadata.get("type"), "main")
         self.assertEqual(info["output"], "save_image")
         self.assertIsNone(info["data"])
 
@@ -204,6 +220,22 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             graph["edges"],
         )
         self.assertIn("save_image", nodes)
+        metadata = nodes["save_image"].get("metadata")
+        self.assertIsInstance(metadata, dict)
+        self.assertEqual(metadata.get("prompt"), "futuristic city skyline")
+        self.assertEqual(metadata.get("negative_prompt"), "low quality")
+        self.assertEqual(metadata.get("seed"), 456)
+        self.assertEqual(metadata.get("width"), 1024)
+        self.assertEqual(metadata.get("height"), 1024)
+        self.assertEqual(metadata.get("steps"), 25)
+        self.assertEqual(metadata.get("cfg_scale"), 6.5)
+        self.assertEqual(metadata.get("scheduler"), "dpmpp_2m")
+        model_metadata = metadata.get("model")
+        self.assertEqual(model_metadata.get("key"), "sdxl-key")
+        self.assertEqual(model_metadata.get("hash"), "hash")
+        self.assertEqual(model_metadata.get("name"), "SDXL Model")
+        self.assertEqual(model_metadata.get("base"), "sdxl")
+        self.assertEqual(model_metadata.get("type"), "main")
         self.assertEqual(info["output"], "save_image")
         self.assertIsNone(info["data"])
 
@@ -240,6 +272,15 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             nodes["save_image"].get("board"),
             {"board_id": "board-123", "board_name": "TerminalAI"},
         )
+        metadata = nodes["save_image"].get("metadata")
+        self.assertEqual(metadata.get("prompt"), "galaxy horizon")
+        self.assertEqual(metadata.get("negative_prompt"), "")
+        self.assertEqual(metadata.get("seed"), 101)
+        self.assertEqual(metadata.get("width"), 1024)
+        self.assertEqual(metadata.get("height"), 1024)
+        self.assertEqual(metadata.get("steps"), 30)
+        self.assertEqual(metadata.get("cfg_scale"), 7.0)
+        self.assertEqual(metadata.get("scheduler"), "euler")
         self.assertIn(
             {
                 "source": {"node_id": "latents_to_image", "field": "image"},
@@ -279,6 +320,15 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             save_node_board,
             {"board_id": "board-55", "board_name": "TerminalAI"},
         )
+        metadata = graph_info["graph"]["nodes"]["save_image"].get("metadata")
+        self.assertEqual(metadata.get("prompt"), "forest")
+        self.assertEqual(metadata.get("negative_prompt"), "")
+        self.assertEqual(metadata.get("seed"), 123)
+        self.assertEqual(metadata.get("width"), 512)
+        self.assertEqual(metadata.get("height"), 512)
+        self.assertEqual(metadata.get("steps"), 20)
+        self.assertEqual(metadata.get("cfg_scale"), 7.5)
+        self.assertEqual(metadata.get("scheduler"), "euler")
 
 
 class InvokeClientBatchStatusTests(unittest.TestCase):
@@ -352,6 +402,15 @@ class InvokeClientBatchStatusTests(unittest.TestCase):
             self.assertEqual(fh.read(), image_content)
         metadata = preview.get("metadata", {})
         self.assertEqual(metadata.get("prompt"), "test prompt")
+        self.assertEqual(metadata.get("negative_prompt"), "")
+        self.assertEqual(metadata.get("width"), 512)
+        self.assertEqual(metadata.get("height"), 512)
+        self.assertEqual(metadata.get("steps"), 20)
+        self.assertEqual(metadata.get("cfg_scale"), 7.5)
+        self.assertEqual(metadata.get("seed"), 42)
+        self.assertEqual(metadata.get("scheduler"), "euler")
+        self.assertEqual(metadata.get("model", {}).get("name"), "model")
+        self.assertEqual(metadata.get("model", {}).get("base"), "sd-1")
 
     def test_get_batch_status_pending_without_preview(self):
         batch_id = "batch-456"
@@ -468,6 +527,9 @@ class InvokeClientBatchStatusTests(unittest.TestCase):
         metadata = preview.get("metadata", {})
         self.assertEqual(metadata.get("prompt"), "board prompt")
         self.assertEqual(metadata.get("image", {}).get("batch_id"), batch_id)
+        self.assertEqual(metadata.get("seed"), 99)
+        self.assertEqual(metadata.get("cfg_scale"), 7.5)
+        self.assertEqual(metadata.get("scheduler"), "euler")
 
     def test_get_batch_status_missing_batch_raises(self):
         batch_id = "missing"
