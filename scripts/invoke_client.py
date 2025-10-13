@@ -2192,6 +2192,24 @@ class InvokeAIClient:
         clip_skip_layers = model_cfg.get("clip_skip", 0)
         use_clip_skip = isinstance(clip_skip_layers, int) and clip_skip_layers > 0
 
+        model_identifiers = {
+            key: model_cfg.get(key)
+            for key in ("key", "hash", "name", "base", "type")
+            if model_cfg.get(key) is not None
+        }
+        metadata: Dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "scheduler": scheduler,
+        }
+        if model_identifiers:
+            metadata["model"] = model_identifiers
+
         nodes: Dict[str, Dict[str, Any]] = {
             "model_loader": {
                 "id": "model_loader",
@@ -2234,6 +2252,7 @@ class InvokeAIClient:
             "save_image": {
                 "id": "save_image",
                 "type": "save_image",
+                "metadata": metadata,
             },
         }
 
@@ -2482,6 +2501,24 @@ class InvokeAIClient:
         board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         graph_id = "terminal_sdxl_graph"
+        model_identifiers = {
+            key: model_cfg.get(key)
+            for key in ("key", "hash", "name", "base", "type")
+            if model_cfg.get(key) is not None
+        }
+        metadata: Dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "scheduler": scheduler,
+        }
+        if model_identifiers:
+            metadata["model"] = model_identifiers
+
         nodes: Dict[str, Dict[str, Any]] = {
             "model_loader": {
                 "id": "model_loader",
@@ -2538,6 +2575,7 @@ class InvokeAIClient:
             "save_image": {
                 "id": "save_image",
                 "type": "save_image",
+                "metadata": metadata,
             },
         }
 
