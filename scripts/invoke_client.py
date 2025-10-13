@@ -37,11 +37,14 @@ QUEUE_ID = "default"
 ORIGIN = "terminalai"
 DESTINATION = "terminalai"
 
-UNCATEGORIZED_BOARD_ID = "no-board"
+UNCATEGORIZED_BOARD_ID = "none"
 """Synthetic board id used for InvokeAI's Uncategorized images."""
 
 UNCATEGORIZED_BOARD_NAME = "Uncategorized"
 """Human readable name for InvokeAI's Uncategorized images."""
+
+UNCATEGORIZED_BOARD_SYNONYMS = {"none", "unassigned", "no-board"}
+"""Known aliases for the uncategorized board identifier."""
 
 
 def _build_static_model_endpoints() -> List[Tuple[str, Optional[Dict[str, Any]]]]:
@@ -2067,7 +2070,7 @@ class InvokeAIClient:
             if not text:
                 return None
             lowered = text.lower()
-            if lowered in {"none", "unassigned", "no-board"}:
+            if lowered in UNCATEGORIZED_BOARD_SYNONYMS:
                 return UNCATEGORIZED_BOARD_ID
             return text
         if isinstance(board_id, bool):
