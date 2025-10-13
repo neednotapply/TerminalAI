@@ -28,6 +28,7 @@ from scripts.invoke_client import (
     InvokeAIModel,
     InvokeAIClientError,
     QUEUE_ID,
+    UNCATEGORIZED_BOARD_ID,
 )
 
 
@@ -602,13 +603,13 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
         self.assertIn("TerminalAI", board_names)
         self.assertEqual(board_names["TerminalAI"]["id"], "77")
         self.assertEqual(board_names["TerminalAI"].get("count"), 5)
-        self.assertEqual(board_names["Uncategorized"]["id"], "no-board")
+        self.assertEqual(board_names["Uncategorized"]["id"], UNCATEGORIZED_BOARD_ID)
 
     def test_normalize_board_id_maps_uncategorized_synonyms(self):
-        self.assertEqual(self.client._normalize_board_id("none"), "no-board")
-        self.assertEqual(self.client._normalize_board_id("UNASSIGNED"), "no-board")
-        self.assertEqual(self.client._normalize_board_id(" unassigned "), "no-board")
-        self.assertEqual(self.client._normalize_board_id("no-board"), "no-board")
+        self.assertEqual(self.client._normalize_board_id("none"), UNCATEGORIZED_BOARD_ID)
+        self.assertEqual(self.client._normalize_board_id("UNASSIGNED"), UNCATEGORIZED_BOARD_ID)
+        self.assertEqual(self.client._normalize_board_id(" unassigned "), UNCATEGORIZED_BOARD_ID)
+        self.assertEqual(self.client._normalize_board_id("no-board"), UNCATEGORIZED_BOARD_ID)
 
     def test_list_schedulers_prefers_metadata(self):
         metadata_payload = {
