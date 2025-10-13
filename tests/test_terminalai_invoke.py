@@ -22,6 +22,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
         self.client.list_board_images = MagicMock()
         self.client.retrieve_board_image = MagicMock()
         self.client.get_cached_image_result = MagicMock(return_value=None)
+        self.client.list_schedulers = MagicMock(return_value=["default"])
         self.model = InvokeAIModel(name="model", base="sdxl", key=None, raw={})
 
     def test_invoke_generate_image_forwards_arguments(self):
@@ -199,6 +200,85 @@ class TerminalAIInvokeTests(unittest.TestCase):
         self.assertEqual(self.client.get_cached_image_result.call_count, 2)
         self.client.get_cached_image_result.assert_any_call("first.png")
         self.client.get_cached_image_result.assert_any_call("second.png")
+
+    def test_poll_invoke_batch_status_returns_preview(self):
+        preview = {"path": Path("/tmp/preview.png"), "metadata": {}}
+        statuses = [
+            {"status": "processing", "total": 2, "completed": 1, "processing": 1, "pending": 1},
+            {
+                "status": "completed",
+                "total": 2,
+                "completed": 2,
+                "processing": 0,
+                "pending": 0,
+                "preview": preview,
+            },
+        ]
+        self.client.get_batch_status.side_effect = statuses
+
+        monotonic_values = [0, 0, 1, 1]
+
+        with patch("builtins.print") as mock_print, patch.object(
+            TerminalAI.time, "monotonic", side_effect=monotonic_values
+        ), patch.object(TerminalAI.time, "sleep") as mock_sleep:
+            status = TerminalAI._poll_invoke_batch_status(
+                self.client, "batch-xyz", timeout=10, poll_interval=0
+            )
+
+        self.assertEqual(status, statuses[-1])
+        self.assertEqual(self.client.get_batch_status.call_count, 2)
+        self.client.get_batch_status.assert_called_with(
+            "batch-xyz", include_preview=True, board_name=TerminalAI.TERMINALAI_BOARD_NAME
+        )
+        progress_calls = [call for call in mock_print.call_args_list if "Batch status:" in call.args[0]]
+        self.assertGreaterEqual(len(progress_calls), 1)
+        mock_sleep.assert_not_called()
+
+    def test_poll_invoke_batch_status_handles_error(self):
+        self.client.get_batch_status.side_effect = TerminalAI.InvokeAIClientError("boom")
+
+        with patch("builtins.print") as mock_print, patch.object(
+            TerminalAI.time, "monotonic", side_effect=[0, 0]
+        ):
+            status = TerminalAI._poll_invoke_batch_status(
+                self.client, "batch-err", timeout=10, poll_interval=0
+            )
+
+        self.assertIsNone(status)
+        self.assertTrue(
+            any("Failed to poll batch" in call.args[0] for call in mock_print.call_args_list)
+        )
+
+    def test_run_generation_flow_polls_and_displays_preview(self):
+        preview = {"path": Path("/tmp/preview.png"), "metadata": {}}
+        polled_status = {"status": "completed", "preview": preview}
+
+        with patch.object(TerminalAI, "select_invoke_model", side_effect=[self.model, None]), patch.object(
+            TerminalAI, "clear_screen"
+        ), patch.object(
+            TerminalAI, "_print_invoke_prompt_header"
+        ), patch.object(
+            TerminalAI, "_invoke_generate_image", return_value={"queue_item_id": "q", "batch_id": "batch-1"}
+        ), patch.object(
+            TerminalAI, "_poll_invoke_batch_status", return_value=polled_status
+        ) as poll_mock, patch.object(
+            TerminalAI, "_present_invoke_preview", return_value=None
+        ) as present_mock, patch.object(
+            TerminalAI, "prompt_int", side_effect=[512, 512, 20]
+        ), patch.object(
+            TerminalAI, "prompt_float", return_value=7.5
+        ), patch.object(
+            TerminalAI, "select_scheduler_option", return_value="scheduler"
+        ), patch.object(
+            TerminalAI, "get_input", side_effect=["Prompt", "", "", "", "ESC"]
+        ):
+            TerminalAI._run_generation_flow(self.client, [self.model])
+
+        poll_mock.assert_called_once()
+        args, kwargs = poll_mock.call_args
+        self.assertEqual(args, (self.client, "batch-1"))
+        self.assertEqual(kwargs, {})
+        present_mock.assert_called_once_with(preview)
 
 
 if __name__ == "__main__":
