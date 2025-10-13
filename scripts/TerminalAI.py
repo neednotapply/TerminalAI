@@ -45,6 +45,33 @@ else:
     import termios
     import tty
 
+
+def _read_escape_sequence() -> str:
+    """Read the remainder of an ANSI escape sequence."""
+
+    if os.name == "nt":
+        seq = ""
+        while msvcrt.kbhit():
+            ch = msvcrt.getwch()
+            seq += ch
+            if ch.isalpha() or ch in "~":
+                break
+        return seq
+
+    fd = sys.stdin.fileno()
+    seq = ""
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.01)
+        if not ready:
+            break
+        ch = os.read(fd, 1).decode(errors="ignore")
+        if not ch:
+            break
+        seq += ch
+        if ch.isalpha() or ch in "~":
+            break
+    return seq
+
 # ANSI colors
 GREEN = "\033[38;2;5;249;0m"
 CYAN = "\033[96m"
