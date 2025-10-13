@@ -60,10 +60,12 @@ def _read_escape_sequence() -> str:
 
     fd = sys.stdin.fileno()
     seq = ""
-    while True:
-        ready, _, _ = select.select([sys.stdin], [], [], 0.01)
+    deadline = time.monotonic() + 0.1
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        ready, _, _ = select.select([sys.stdin], [], [], remaining)
         if not ready:
-            break
+            continue
         ch = os.read(fd, 1).decode(errors="ignore")
         if not ch:
             break
