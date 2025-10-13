@@ -13,7 +13,7 @@ import socket
 import subprocess
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from pathlib import Path
 from rain import rain
 from invoke_client import (
@@ -934,13 +934,13 @@ def _poll_invoke_batch_status(
             time.sleep(poll_interval)
 
 
-def _present_invoke_preview(preview: Dict[str, Any]) -> None:
-    if not isinstance(preview, dict):
+def _present_invoke_result(result: Dict[str, Any], *, label: str = "Batch preview available") -> None:
+    if not isinstance(result, dict):
         return
 
-    print(f"{GREEN}Batch preview available:{RESET}")
-    path_value = preview.get("path")
-    metadata = preview.get("metadata") if isinstance(preview.get("metadata"), dict) else {}
+    print(f"{GREEN}{label}:{RESET}")
+    path_value = result.get("path")
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
 
     if path_value:
         print(f"{CYAN}Preview saved to {path_value}{RESET}")
@@ -951,7 +951,148 @@ def _present_invoke_preview(preview: Dict[str, Any]) -> None:
     if path_value:
         display_with_chafa(path_value)
 
-    _cleanup_image_result(preview, discard=True)
+    _cleanup_image_result(result, discard=True)
+
+
+def _load_invoke_final_result(
+    client: InvokeAIClient,
+    status: Dict[str, Any],
+    batch_id: str,
+) -> Optional[Dict[str, Any]]:
+    try:
+        board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+    except InvokeAIClientError as exc:
+        print(f"{YELLOW}Unable to load final image: {exc}{RESET}")
+        return None
+    except requests.RequestException as exc:
+        print(f"{YELLOW}Network error while loading final image: {exc}{RESET}")
+        return None
+
+    if not _is_valid_terminalai_board_id(board_id):
+        print(f"{YELLOW}{TERMINALAI_BOARD_RESOLUTION_ERROR}.{RESET}")
+        return None
+
+    try:
+        board_entries = client.list_board_images(board_id, limit=10)
+    except InvokeAIClientError as exc:
+        print(f"{YELLOW}Unable to load final image from board: {exc}{RESET}")
+        return None
+    except requests.RequestException as exc:
+        print(f"{YELLOW}Network error while loading final image from board: {exc}{RESET}")
+        return None
+
+    if not board_entries:
+        return None
+
+    identifiers: set[str] = set()
+
+    def _add_identifier(value: Any) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                identifiers.add(text)
+        elif isinstance(value, (int, float)) and math.isfinite(value):
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            identifiers.add(str(value).strip())
+
+    _add_identifier(batch_id)
+    queue_item_id = status.get("queue_item_id") if isinstance(status, dict) else None
+    if queue_item_id is not None:
+        _add_identifier(queue_item_id)
+
+    queue_items = status.get("queue_items") if isinstance(status, dict) else None
+    if isinstance(queue_items, list):
+        for entry in queue_items:
+            if isinstance(entry, dict):
+                _add_identifier(entry.get("item_id"))
+
+    def _gather_identifiers(value: Any, seen: set[int]) -> Iterable[str]:
+        if isinstance(value, dict):
+            obj_id = id(value)
+            if obj_id in seen:
+                return []
+            seen.add(obj_id)
+            keys = (
+                "batch_id",
+                "batchId",
+                "batchID",
+                "item_id",
+                "queue_item_id",
+                "queue_item",
+                "queueId",
+                "session_id",
+            )
+            results: List[str] = []
+            for key in keys:
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    candidate_text = candidate.strip()
+                    if candidate_text:
+                        results.append(candidate_text)
+                elif isinstance(candidate, (int, float)) and math.isfinite(candidate):
+                    if isinstance(candidate, float) and candidate.is_integer():
+                        candidate = int(candidate)
+                    results.append(str(candidate).strip())
+            for child in value.values():
+                results.extend(_gather_identifiers(child, seen))
+            return results
+        if isinstance(value, list):
+            obj_id = id(value)
+            if obj_id in seen:
+                return []
+            seen.add(obj_id)
+            results: List[str] = []
+            for item in value:
+                results.extend(_gather_identifiers(item, seen))
+            return results
+        return []
+
+    def _matches(entry: Dict[str, Any]) -> bool:
+        if not identifiers:
+            return False
+        entry_identifiers = set(_gather_identifiers(entry, set()))
+        return any(identifier in entry_identifiers for identifier in identifiers)
+
+    for candidate in board_entries:
+        if not isinstance(candidate, dict):
+            continue
+        if _matches(candidate):
+            try:
+                return client.retrieve_board_image(
+                    image_info=candidate,
+                    board_name=TERMINALAI_BOARD_NAME,
+                )
+            except InvokeAIClientError as exc:
+                print(f"{YELLOW}Failed to download final image: {exc}{RESET}")
+                return None
+            except requests.RequestException as exc:
+                print(f"{YELLOW}Network error while downloading final image: {exc}{RESET}")
+                return None
+
+    if len(board_entries) == 1:
+        fallback_entry = board_entries[0]
+    else:
+        fallback_entry = board_entries[0] if isinstance(board_entries[0], dict) else None
+
+    if isinstance(fallback_entry, dict):
+        try:
+            return client.retrieve_board_image(
+                image_info=fallback_entry,
+                board_name=TERMINALAI_BOARD_NAME,
+            )
+        except InvokeAIClientError as exc:
+            print(f"{YELLOW}Failed to download final image: {exc}{RESET}")
+        except requests.RequestException as exc:
+            print(f"{YELLOW}Network error while downloading final image: {exc}{RESET}")
+
+    return None
+
+
+def _present_invoke_preview(preview: Dict[str, Any]) -> None:
+    """Backward compatible wrapper for legacy preview presenter."""
+
+    _present_invoke_result(preview)
 
 
 def confirm_exit():
@@ -1454,7 +1595,7 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                 print(f"{CYAN}Queue item id: {queue_id}{RESET}")
             else:
                 print(
-                    f"{YELLOW}Server did not return a queue item id. Check the Auto board for the finished image.{RESET}"
+                    f"{YELLOW}Server did not return a queue item id. Check the {TERMINALAI_BOARD_NAME} board for the finished image.{RESET}"
                 )
             if batch_id:
                 print(f"{CYAN}Batch id: {batch_id}{RESET}")
@@ -1467,15 +1608,25 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                 if isinstance(polled_status, dict):
                     preview = polled_status.get("preview") if isinstance(polled_status.get("preview"), dict) else None
                     preview_error = polled_status.get("preview_error")
+                    final_result: Optional[Dict[str, Any]] = None
                     if preview:
                         _present_invoke_preview(preview)
-                    elif preview_error:
-                        print(f"{YELLOW}Preview unavailable: {preview_error}{RESET}")
-                    elif _is_batch_complete(polled_status):
-                        print(
-                            f"{YELLOW}Batch {batch_id} completed without returning a preview. Check the {TERMINALAI_BOARD_NAME} board for the final image.{RESET}"
-                        )
                     else:
+                        if _is_batch_complete(polled_status):
+                            final_result = _load_invoke_final_result(
+                                client,
+                                polled_status,
+                                batch_id,
+                            )
+                        if final_result:
+                            _present_invoke_result(final_result, label="Batch result available")
+                        elif preview_error:
+                            print(f"{YELLOW}Preview unavailable: {preview_error}{RESET}")
+                        elif _is_batch_complete(polled_status):
+                            print(
+                                f"{YELLOW}Batch {batch_id} completed without returning a preview. Check the {TERMINALAI_BOARD_NAME} board for the final image.{RESET}"
+                            )
+                    if not preview and final_result is None and not _is_batch_complete(polled_status):
                         print(
                             f"{YELLOW}Batch {batch_id} is still processing. You can monitor progress on the {TERMINALAI_BOARD_NAME} board.{RESET}"
                         )
