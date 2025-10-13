@@ -224,22 +224,30 @@ def run_unix_menu() -> int | None:
 
 def main() -> None:
     args = sys.argv[1:]
-    if DEBUG_MODE:
-        choice = run_verbose()
-    else:
-        choice = run_windows_menu() if os.name == "nt" else run_unix_menu()
-    if choice is None:
-        return
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    selected = MENU_OPTIONS[choice]
-    if selected["script"] == "shodanscan.py":
-        os.system("cls" if os.name == "nt" else "clear")
-    elif choice != 0:
-        os.system("cls" if os.name == "nt" else "clear")
-    cmd = [sys.executable, os.path.join(script_dir, selected["script"])]
-    cmd.extend(selected.get("extra_args", []))
-    cmd.extend(args)
-    subprocess.call(cmd)
+
+    while True:
+        if DEBUG_MODE:
+            choice = run_verbose()
+        else:
+            choice = run_windows_menu() if os.name == "nt" else run_unix_menu()
+
+        if choice is None:
+            return
+
+        selected = MENU_OPTIONS[choice]
+        if selected["script"] == "shodanscan.py" or choice != 0:
+            os.system("cls" if os.name == "nt" else "clear")
+
+        cmd = [sys.executable, os.path.join(script_dir, selected["script"])]
+        cmd.extend(selected.get("extra_args", []))
+        cmd.extend(args)
+
+        try:
+            subprocess.call(cmd)
+        finally:
+            if not DEBUG_MODE:
+                os.system("cls" if os.name == "nt" else "clear")
 
 
 if __name__ == "__main__":
