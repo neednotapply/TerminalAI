@@ -199,8 +199,8 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             model=model,
             prompt="futuristic city skyline",
             negative_prompt="low quality",
-            width=1024,
-            height=1024,
+            width=1280,
+            height=720,
             steps=25,
             cfg_scale=6.5,
             scheduler="dpmpp_2m",
@@ -210,7 +210,7 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         graph = info["graph"]
         nodes = graph["nodes"]
         self.assertIn("positive_conditioning", nodes)
-        self.assertEqual(nodes["positive_conditioning"]["target_width"], 1024)
+        self.assertEqual(nodes["positive_conditioning"]["target_width"], 1280)
         self.assertNotIn("pos_collect", nodes)
         self.assertIn(
             {
@@ -225,8 +225,8 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         self.assertEqual(metadata.get("prompt"), "futuristic city skyline")
         self.assertEqual(metadata.get("negative_prompt"), "low quality")
         self.assertEqual(metadata.get("seed"), 456)
-        self.assertEqual(metadata.get("width"), 1024)
-        self.assertEqual(metadata.get("height"), 1024)
+        self.assertEqual(metadata.get("width"), 1280)
+        self.assertEqual(metadata.get("height"), 720)
         self.assertEqual(metadata.get("steps"), 25)
         self.assertEqual(metadata.get("cfg_scale"), 6.5)
         self.assertEqual(metadata.get("scheduler"), "dpmpp_2m")
@@ -257,8 +257,8 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             model=model,
             prompt="galaxy horizon",
             negative_prompt="",
-            width=1024,
-            height=1024,
+            width=1280,
+            height=720,
             steps=30,
             cfg_scale=7.0,
             scheduler="euler",
@@ -276,8 +276,8 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         self.assertEqual(metadata.get("prompt"), "galaxy horizon")
         self.assertEqual(metadata.get("negative_prompt"), "")
         self.assertEqual(metadata.get("seed"), 101)
-        self.assertEqual(metadata.get("width"), 1024)
-        self.assertEqual(metadata.get("height"), 1024)
+        self.assertEqual(metadata.get("width"), 1280)
+        self.assertEqual(metadata.get("height"), 720)
         self.assertEqual(metadata.get("steps"), 30)
         self.assertEqual(metadata.get("cfg_scale"), 7.0)
         self.assertEqual(metadata.get("scheduler"), "euler")
