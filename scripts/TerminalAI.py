@@ -896,6 +896,10 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                 index = len(entries) - 1
             continue
 
+        clear_screen()
+        _print_board_view_header(client, board_name)
+        print(f"{CYAN}Image {index + 1} of {len(entries)}{RESET}")
+
         path_value = result.get("path") if isinstance(result, dict) else None
         metadata = result.get("metadata") if isinstance(result, dict) else {}
         if path_value:
@@ -1160,12 +1164,19 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
         if model is None:
             return
 
+        refresh_prompt_view = True
         while True:
+            if refresh_prompt_view:
+                clear_screen()
+                _print_invoke_prompt_header(client, model)
+            refresh_prompt_view = True
+
             prompt = get_input(f"{CYAN}Prompt: {RESET}")
             if prompt == "ESC":
                 break
             if not prompt.strip():
                 print(f"{RED}Prompt cannot be empty{RESET}")
+                refresh_prompt_view = False
                 continue
 
             negative = get_input(f"{CYAN}Negative prompt (optional): {RESET}")
@@ -1198,6 +1209,7 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                     seed_val = int(seed_text)
                 except ValueError:
                     print(f"{RED}Seed must be an integer{RESET}")
+                    refresh_prompt_view = False
                     continue
 
             width = max(64, (int(width) // 8) * 8)
@@ -1220,10 +1232,12 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
             except InvokeAIClientError as exc:
                 print(f"{RED}{exc}{RESET}")
                 get_input(f"{CYAN}Press Enter to try again{RESET}")
+                refresh_prompt_view = True
                 continue
             except requests.RequestException as exc:
                 print(f"{RED}Network error: {exc}{RESET}")
                 get_input(f"{CYAN}Press Enter to try again{RESET}")
+                refresh_prompt_view = True
                 continue
 
             queue_id = submission.get("queue_item_id") if isinstance(submission, dict) else None
@@ -1242,8 +1256,12 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
             if seed_used is not None:
                 print(f"{CYAN}Seed used: {seed_used}{RESET}")
 
-            get_input(f"{CYAN}Press Enter to return to the InvokeAI menu{RESET}")
-            return
+            acknowledgement = get_input(
+                f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
+            )
+            if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
+                break
+            refresh_prompt_view = True
 def _invoke_generate_image(
     client: InvokeAIClient,
     model: "InvokeAIModel",
@@ -1409,6 +1427,38 @@ def persist_nickname(api_type, server, new_nick):
         write_endpoints(api_type, df)
     except Exception as e:
         print(f"{RED}Failed to persist nickname: {e}{RESET}")
+
+
+def _rename_current_server(api_type: str, client: Optional[InvokeAIClient] = None) -> None:
+    """Prompt the user to rename the currently selected server."""
+
+    global selected_server
+
+    if not isinstance(selected_server, dict):
+        print(f"{YELLOW}Server information unavailable.{RESET}")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    current_name = selected_server.get("nickname") or selected_server.get("ip") or "Server"
+    print(f"{CYAN}Current nickname: {current_name}{RESET}")
+    response = get_input(f"{CYAN}New nickname (blank=cancel): {RESET}")
+    if isinstance(response, str) and response.strip().lower() == "esc":
+        print(f"{YELLOW}Rename cancelled.{RESET}")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    new_name = response.strip() if isinstance(response, str) else ""
+    if not new_name:
+        print(f"{YELLOW}Nickname unchanged.{RESET}")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    selected_server["nickname"] = new_name
+    if client is not None:
+        client.nickname = new_name
+    persist_nickname(api_type, selected_server, new_name)
+    print(f"{GREEN}Nickname updated to {new_name}{RESET}")
+    get_input(f"{CYAN}Press Enter to continue{RESET}")
 
 def conv_dir(model):
     safe = re.sub(r'[\\/:*?"<>|]', '_', model)
@@ -1806,6 +1856,31 @@ def redraw_ui(model):
     print(f"{BOLD}{GREEN}🖥️ AI Terminal Interface | Active Model: {model}{RESET}")
     print(f"{GREEN}{ip}:{port} | {selected_server['nickname']}{RESET}")
     print(f"{YELLOW}Type prompts below. Commands: /exit, /clear, /paste, /back, /print, /nick (Esc=Back){RESET}")
+
+
+def _print_invoke_prompt_header(client: InvokeAIClient, model: InvokeAIModel) -> None:
+    """Render the InvokeAI prompt header bar."""
+
+    nickname = getattr(client, "nickname", None) or client.ip
+    endpoint = f"{client.ip}:{client.port}" if getattr(client, "port", None) else client.ip
+    print(f"{BOLD}{GREEN}🖼️ InvokeAI Image Generator{RESET}")
+    print(f"{GREEN}Server: {nickname} ({endpoint}){RESET}")
+    print(f"{GREEN}Model: {model.name}{RESET}")
+    print(
+        f"{YELLOW}Enter prompt details below. Press Esc at any prompt to change the model or server.{RESET}"
+    )
+    print()
+
+
+def _print_board_view_header(client: InvokeAIClient, board_name: str) -> None:
+    """Render the header for the board image viewer."""
+
+    nickname = getattr(client, "nickname", None) or client.ip
+    endpoint = f"{client.ip}:{client.port}" if getattr(client, "port", None) else client.ip
+    print(f"{BOLD}{GREEN}🖼️ InvokeAI Board Viewer{RESET}")
+    print(f"{GREEN}Server: {nickname} ({endpoint}){RESET}")
+    print(f"{GREEN}Board: {board_name}{RESET}")
+    print()
 
 def display_connecting_box(x, y, w, h):
     for i in range(h):
@@ -2375,7 +2450,7 @@ def run_image_mode():
             clear_screen()
 
         while True:
-            options = ["View Boards", "Generate Images", "Check Batch Status", "[Back]"]
+            options = ["View Boards", "Generate Images", "Rename Server", "[Back]"]
             header = f"InvokeAI on {client.nickname}:"
             choice = interactive_menu(header, options)
             if choice is None or choice == len(options) - 1:
@@ -2392,7 +2467,7 @@ def run_image_mode():
                 continue
             if choice == 2:
                 clear_screen()
-                _check_batch_status(client)
+                _rename_current_server("invokeai", client)
                 clear_screen()
                 continue
 
