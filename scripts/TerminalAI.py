@@ -11,6 +11,7 @@ import re
 import threading
 import socket
 import subprocess
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -90,6 +91,9 @@ TERMINALAI_BOARD_RESOLUTION_ERROR = (
 TERMINALAI_BOARD_ID_ERROR_MESSAGE = (
     f"InvokeAI server did not provide a valid id for board {TERMINALAI_BOARD_NAME}."
 )
+
+BATCH_STATUS_TIMEOUT = 120.0
+BATCH_STATUS_POLL_INTERVAL = 2.0
 
 
 def _normalize_board_id(board_id: Any) -> Optional[str]:
@@ -820,6 +824,136 @@ def _print_board_image_summary(metadata: Dict[str, Any]) -> None:
         print(f"{CYAN}Seed:{RESET} {seed}")
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        if isinstance(value, float):
+            return int(value)
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except (ValueError, TypeError):
+            return default
+    return default
+
+
+def _print_invoke_batch_progress(status: Dict[str, Any]) -> None:
+    total = _coerce_int(status.get("total"), default=0)
+    completed = _coerce_int(status.get("completed"), default=0)
+    processing = _coerce_int(status.get("processing"), default=0)
+    pending = _coerce_int(status.get("pending"), default=0)
+    status_label = status.get("status") if isinstance(status.get("status"), str) else ""
+    status_text = status_label.strip().title() if status_label else "Unknown"
+
+    if total > 0:
+        progress_bits = [f"{completed}/{total} complete"]
+    else:
+        progress_bits = [f"{completed} complete"]
+
+    details: List[str] = []
+    if processing > 0:
+        details.append(f"{processing} processing")
+    if pending > 0:
+        details.append(f"{pending} pending")
+
+    if details:
+        progress_bits.append("(" + ", ".join(details) + ")")
+
+    print(f"{CYAN}Batch status:{RESET} {status_text} — {' '.join(progress_bits)}")
+
+
+def _is_batch_complete(status: Dict[str, Any]) -> bool:
+    status_label = status.get("status") if isinstance(status.get("status"), str) else ""
+    normalized = status_label.strip().lower()
+    if normalized in {"completed", "failed"}:
+        return True
+
+    total = _coerce_int(status.get("total"), default=0)
+    completed = _coerce_int(status.get("completed"), default=0)
+    if total > 0 and completed >= total:
+        return True
+
+    pending = _coerce_int(status.get("pending"), default=0)
+    processing = _coerce_int(status.get("processing"), default=0)
+    if total == 0 and pending == 0 and processing == 0 and completed > 0:
+        return True
+
+    return False
+
+
+def _poll_invoke_batch_status(
+    client: InvokeAIClient,
+    batch_id: str,
+    *,
+    timeout: float = BATCH_STATUS_TIMEOUT,
+    poll_interval: float = BATCH_STATUS_POLL_INTERVAL,
+) -> Optional[Dict[str, Any]]:
+    start = time.monotonic()
+    last_status: Optional[Dict[str, Any]] = None
+
+    while True:
+        now = time.monotonic()
+        if now - start > timeout:
+            print(
+                f"{YELLOW}Timed out waiting for batch {batch_id} to complete. Check the {TERMINALAI_BOARD_NAME} board for results.{RESET}"
+            )
+            return last_status
+
+        try:
+            status = client.get_batch_status(
+                batch_id,
+                include_preview=True,
+                board_name=TERMINALAI_BOARD_NAME,
+            )
+        except InvokeAIClientError as exc:
+            print(f"{YELLOW}Failed to poll batch {batch_id}: {exc}{RESET}")
+            return last_status
+        except requests.RequestException as exc:
+            print(f"{YELLOW}Network error while polling batch {batch_id}: {exc}{RESET}")
+            return last_status
+
+        if not isinstance(status, dict):
+            print(
+                f"{YELLOW}InvokeAI returned an unexpected batch status payload. Check the {TERMINALAI_BOARD_NAME} board for updates.{RESET}"
+            )
+            return last_status
+
+        last_status = status
+        _print_invoke_batch_progress(status)
+
+        preview = status.get("preview")
+        if isinstance(preview, dict):
+            return status
+
+        if _is_batch_complete(status):
+            return status
+
+        if poll_interval > 0:
+            time.sleep(poll_interval)
+
+
+def _present_invoke_preview(preview: Dict[str, Any]) -> None:
+    if not isinstance(preview, dict):
+        return
+
+    print(f"{GREEN}Batch preview available:{RESET}")
+    path_value = preview.get("path")
+    metadata = preview.get("metadata") if isinstance(preview.get("metadata"), dict) else {}
+
+    if path_value:
+        print(f"{CYAN}Preview saved to {path_value}{RESET}")
+
+    if metadata:
+        _print_board_image_summary(metadata)
+
+    if path_value:
+        display_with_chafa(path_value)
+
+    _cleanup_image_result(preview, discard=True)
+
+
 def confirm_exit():
     choice = interactive_menu("Exit?", ["No", "Yes"])
     return choice == 1
@@ -1326,6 +1460,29 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                 print(f"{CYAN}Batch id: {batch_id}{RESET}")
             if seed_used is not None:
                 print(f"{CYAN}Seed used: {seed_used}{RESET}")
+
+            polled_status: Optional[Dict[str, Any]] = None
+            if batch_id:
+                polled_status = _poll_invoke_batch_status(client, batch_id)
+                if isinstance(polled_status, dict):
+                    preview = polled_status.get("preview") if isinstance(polled_status.get("preview"), dict) else None
+                    preview_error = polled_status.get("preview_error")
+                    if preview:
+                        _present_invoke_preview(preview)
+                    elif preview_error:
+                        print(f"{YELLOW}Preview unavailable: {preview_error}{RESET}")
+                    elif _is_batch_complete(polled_status):
+                        print(
+                            f"{YELLOW}Batch {batch_id} completed without returning a preview. Check the {TERMINALAI_BOARD_NAME} board for the final image.{RESET}"
+                        )
+                    else:
+                        print(
+                            f"{YELLOW}Batch {batch_id} is still processing. You can monitor progress on the {TERMINALAI_BOARD_NAME} board.{RESET}"
+                        )
+                else:
+                    print(
+                        f"{YELLOW}Unable to retrieve live status for batch {batch_id}. Check the {TERMINALAI_BOARD_NAME} board for updates.{RESET}"
+                    )
 
             acknowledgement = get_input(
                 f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
