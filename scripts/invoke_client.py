@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import math
 import json
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1969,6 +1971,55 @@ class InvokeAIClient:
         payload = self._safe_json(resp)
         return payload if isinstance(payload, dict) else None
 
+    def _resolve_cached_image_paths(self, image_name: str) -> Tuple[Path, Path]:
+        """Return the expected cache locations for an image."""
+
+        raw_text = image_name if isinstance(image_name, str) else ""
+        base_name = Path(raw_text).name or raw_text
+        base_path = Path(base_name)
+        stem = base_path.stem or base_name or "invokeai"
+        sanitized_stem = re.sub(r"[^0-9A-Za-z._-]+", "_", stem).strip("._")
+        if not sanitized_stem:
+            sanitized_stem = hashlib.sha256(raw_text.encode("utf-8", "ignore")).hexdigest()[:16]
+
+        suffix_candidate = base_path.suffix
+        if suffix_candidate and re.fullmatch(r"\.[0-9A-Za-z]+", suffix_candidate):
+            suffix = suffix_candidate
+        else:
+            suffix = ".png"
+
+        image_path = self.images_dir / f"{sanitized_stem}{suffix}"
+        metadata_path = image_path.with_suffix(".json")
+        return image_path, metadata_path
+
+    def get_cached_image_result(self, image_name: str) -> Optional[Dict[str, Any]]:
+        """Return cached image information if present on disk."""
+
+        if not isinstance(image_name, str) or not image_name.strip():
+            return None
+
+        image_path, metadata_path = self._resolve_cached_image_paths(image_name)
+        if not image_path.exists():
+            return None
+
+        metadata: Dict[str, Any] = {}
+        if metadata_path.exists():
+            try:
+                with metadata_path.open("r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    metadata = loaded
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+
+        return {
+            "path": image_path,
+            "metadata_path": metadata_path,
+            "image_name": image_name,
+            "metadata": metadata,
+            "cached": True,
+        }
+
     def _normalize_metadata_value(self, value: Any) -> Any:
         if isinstance(value, dict):
             return {key: self._normalize_metadata_value(val) for key, val in value.items()}
@@ -1996,17 +2047,17 @@ class InvokeAIClient:
         item_id: Optional[str],
         session_id: Optional[str],
     ) -> Dict[str, Any]:
-        image_url = f"{self.base_url}/api/v1/images/i/{image_name}/full"
-        image_resp = requests.get(image_url, timeout=30)
-        image_resp.raise_for_status()
+        out_path, meta_path = self._resolve_cached_image_paths(image_name)
+        image_already_cached = out_path.exists()
 
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        safe_name = image_name.replace("/", "_")
-        out_path = self.images_dir / f"{timestamp}_{safe_name}"
-        with out_path.open("wb") as f:
-            f.write(image_resp.content)
+        if not image_already_cached:
+            image_url = f"{self.base_url}/api/v1/images/i/{image_name}/full"
+            image_resp = requests.get(image_url, timeout=30)
+            image_resp.raise_for_status()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with out_path.open("wb") as f:
+                f.write(image_resp.content)
 
-        meta_path = out_path.with_suffix(".json")
         metadata = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -2038,6 +2089,8 @@ class InvokeAIClient:
             "metadata_path": meta_path,
             "image_name": image_name,
             "metadata": metadata,
+            "cached": True,
+            "from_cache": image_already_cached,
         }
 
     def _build_result_from_board_image(

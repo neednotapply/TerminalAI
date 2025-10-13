@@ -21,6 +21,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
         self.client.ensure_board = MagicMock(return_value="board-123")
         self.client.list_board_images = MagicMock()
         self.client.retrieve_board_image = MagicMock()
+        self.client.get_cached_image_result = MagicMock(return_value=None)
         self.model = InvokeAIModel(name="model", base="sdxl", key=None, raw={})
 
     def test_invoke_generate_image_forwards_arguments(self):
@@ -152,6 +153,52 @@ class TerminalAIInvokeTests(unittest.TestCase):
 
         self.client.list_board_images.assert_not_called()
         self.client.retrieve_board_image.assert_not_called()
+
+
+    def test_browse_board_images_uses_cached_preview_when_available(self):
+        board = {"name": "Board", "id": "board-1"}
+        entry_one = {"image_name": "first.png"}
+        entry_two = {"image_name": "second.png"}
+        self.client.list_board_images.return_value = [entry_one, entry_two]
+
+        retrieved_result = {
+            "path": Path("/tmp/cache/first.png"),
+            "metadata_path": Path("/tmp/cache/first.json"),
+            "metadata": {"prompt": "one"},
+            "cached": True,
+        }
+        cached_result = {
+            "path": Path("/tmp/cache/second.png"),
+            "metadata_path": Path("/tmp/cache/second.json"),
+            "metadata": {"prompt": "two"},
+            "cached": True,
+        }
+
+        def cache_lookup(name):
+            return cached_result if name == "second.png" else None
+
+        self.client.retrieve_board_image.return_value = retrieved_result
+        self.client.get_cached_image_result.side_effect = cache_lookup
+
+        with patch.object(TerminalAI, "clear_screen"), patch.object(
+            TerminalAI, "_print_board_view_header"
+        ), patch.object(
+            TerminalAI, "_print_board_image_summary"
+        ), patch.object(
+            TerminalAI, "display_with_chafa"
+        ), patch.object(
+            TerminalAI, "get_input", return_value=""
+        ), patch.object(
+            TerminalAI, "get_key", side_effect=["RIGHT", "ESC"]
+        ):
+            TerminalAI._browse_board_images(self.client, board)
+
+        self.client.retrieve_board_image.assert_called_once_with(
+            image_info=entry_one, board_name="Board"
+        )
+        self.assertEqual(self.client.get_cached_image_result.call_count, 2)
+        self.client.get_cached_image_result.assert_any_call("first.png")
+        self.client.get_cached_image_result.assert_any_call("second.png")
 
 
 if __name__ == "__main__":

@@ -750,9 +750,16 @@ def display_with_chafa(image_path):
     _display_with_chafa_cli(path)
 
 
-def _cleanup_image_result(result):
-    path = result.get("path") if isinstance(result, dict) else None
-    metadata_path = result.get("metadata_path") if isinstance(result, dict) else None
+def _cleanup_image_result(result, *, discard: bool = False):
+    if not isinstance(result, dict):
+        return
+
+    cached = bool(result.get("cached"))
+    if cached and not discard:
+        return
+
+    path = result.get("path")
+    metadata_path = result.get("metadata_path")
 
     if path:
         try:
@@ -906,24 +913,41 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
             index = len(entries) - 1
 
         entry = entries[index]
-        try:
-            result = client.retrieve_board_image(image_info=entry, board_name=board_name)
-        except InvokeAIClientError as exc:
-            print(f"{YELLOW}Skipping image: {exc}{RESET}")
-            entries.pop(index)
-            if not entries:
-                break
-            if index >= len(entries):
-                index = len(entries) - 1
-            continue
-        except requests.RequestException as exc:
-            print(f"{YELLOW}Failed to download image: {exc}{RESET}")
-            entries.pop(index)
-            if not entries:
-                break
-            if index >= len(entries):
-                index = len(entries) - 1
-            continue
+        image_name_value = entry.get("image_name") if isinstance(entry, dict) else None
+        result: Optional[Dict[str, Any]] = None
+
+        cache_lookup = getattr(client, "get_cached_image_result", None)
+        if (
+            callable(cache_lookup)
+            and isinstance(image_name_value, str)
+            and image_name_value.strip()
+        ):
+            try:
+                cached_candidate = cache_lookup(image_name_value)
+            except Exception:
+                cached_candidate = None
+            if isinstance(cached_candidate, dict):
+                result = cached_candidate
+
+        if result is None:
+            try:
+                result = client.retrieve_board_image(image_info=entry, board_name=board_name)
+            except InvokeAIClientError as exc:
+                print(f"{YELLOW}Skipping image: {exc}{RESET}")
+                entries.pop(index)
+                if not entries:
+                    break
+                if index >= len(entries):
+                    index = len(entries) - 1
+                continue
+            except requests.RequestException as exc:
+                print(f"{YELLOW}Failed to download image: {exc}{RESET}")
+                entries.pop(index)
+                if not entries:
+                    break
+                if index >= len(entries):
+                    index = len(entries) - 1
+                continue
 
         clear_screen()
         _print_board_view_header(client, board_name)
@@ -931,6 +955,15 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
 
         path_value = result.get("path") if isinstance(result, dict) else None
         metadata = result.get("metadata") if isinstance(result, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if not metadata and isinstance(entry, dict):
+            entry_metadata = entry.get("metadata")
+            if isinstance(entry_metadata, dict):
+                metadata = entry_metadata
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["metadata"] = metadata
         if path_value:
             print(f"{CYAN}Preview saved to {path_value}{RESET}")
         if isinstance(metadata, dict):
@@ -938,19 +971,33 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
         if path_value:
             display_with_chafa(path_value)
 
-        saved = False
         current_path = Path(path_value) if path_value else None
         metadata_path_value = result.get("metadata_path") if isinstance(result, dict) else None
 
         while True:
             print(
-                f"{CYAN}\u2190/A for previous, \u2192/D for next, Enter to save, Esc to return.{RESET}"
+                f"{CYAN}\u2190/A for previous, \u2192/D for next, Enter to save, X to discard cache, Esc to return.{RESET}"
             )
             action = get_key()
             if action in ("a", "A"):
                 action = "LEFT"
             elif action in ("d", "D"):
                 action = "RIGHT"
+
+            if action in ("x", "X"):
+                if not current_path:
+                    print(f"{YELLOW}No cached preview available to discard.{RESET}")
+                    continue
+                _cleanup_image_result(result, discard=True)
+                print(f"{GREEN}Cached preview removed.{RESET}")
+                current_path = None
+                metadata_path_value = None
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["path"] = None
+                    result["metadata_path"] = None
+                    result["cached"] = False
+                continue
 
             if action == "ENTER":
                 if not current_path:
@@ -985,6 +1032,7 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                         print(f"{GREEN}Image saved to {target_path}{RESET}")
                         current_path = target_path
                         if isinstance(result, dict):
+                            result = dict(result)
                             result["path"] = str(target_path)
                     except OSError as exc:
                         print(f"{YELLOW}Failed to rename image: {exc}{RESET}")
@@ -1000,10 +1048,10 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                             meta_path.rename(target_meta)
                             metadata_path_value = str(target_meta)
                             if isinstance(result, dict):
+                                result = dict(result)
                                 result["metadata_path"] = str(target_meta)
                         except OSError as exc:
                             print(f"{YELLOW}Failed to rename metadata file: {exc}{RESET}")
-                saved = True
                 continue
 
             if action == "RIGHT":
@@ -1022,8 +1070,6 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                     else:
                         print(f"{YELLOW}Already viewing the newest image on this board.{RESET}")
                         continue
-                if not saved:
-                    _cleanup_image_result(result)
                 print(f"{CYAN}Loading next image...{RESET}")
                 index += 1
                 break
@@ -1032,15 +1078,11 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
                 if index == 0:
                     print(f"{YELLOW}Already viewing the oldest image loaded for this board.{RESET}")
                     continue
-                if not saved:
-                    _cleanup_image_result(result)
                 print(f"{CYAN}Loading previous image...{RESET}")
                 index -= 1
                 break
 
             if action == "ESC":
-                if not saved:
-                    _cleanup_image_result(result)
                 return
 
         # end of inner loop
@@ -1158,7 +1200,7 @@ def _check_batch_status(client: InvokeAIClient) -> None:
             if path_value:
                 display_with_chafa(path_value)
             get_input(f"{CYAN}Press Enter to return to the InvokeAI menu{RESET}")
-            _cleanup_image_result(preview)
+            _cleanup_image_result(preview, discard=True)
             return
 
         if preview_error:
