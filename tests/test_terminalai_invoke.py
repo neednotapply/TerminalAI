@@ -51,6 +51,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             scheduler="custom_scheduler",
             seed=123,
             board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_id="board-123",
         )
         self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": "abc"})
@@ -83,6 +84,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
             scheduler=TerminalAI.DEFAULT_SCHEDULER,
             seed=None,
             board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_id="board-123",
         )
         self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": None})

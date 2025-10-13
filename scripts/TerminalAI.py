@@ -1326,6 +1326,7 @@ def _invoke_generate_image(
         scheduler=scheduler_name,
         seed=seed,
         board_name=TERMINALAI_BOARD_NAME,
+        board_id=board_id,
     )
 
 

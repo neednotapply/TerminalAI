@@ -936,7 +936,10 @@ class InvokeSubmissionTests(unittest.TestCase):
             return_value=(payload, graph_info, 101),
         ) as mock_prepare, patch(
             "requests.post",
-            return_value=DummyResponse({}, headers={"Location": f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/i/item-55"}),
+            return_value=DummyResponse(
+                {},
+                headers={"Location": f"http://{TEST_SERVER_IP}:9090/api/v1/queue/{QUEUE_ID}/i/item-55"},
+            ),
         ):
             self.client.submit_image_generation(
                 model=model,
@@ -965,6 +968,49 @@ class InvokeSubmissionTests(unittest.TestCase):
             board_id="board-99",
             board_name="TerminalAI",
         )
+
+    def test_submit_image_generation_uses_explicit_board_id(self):
+        model = InvokeAIModel(name="demo", base="sdxl", key=None, raw={})
+        payload = {"prepend": False, "batch": {}}
+        graph_info = {"graph": {"id": "graph-1"}, "output": "out"}
+
+        with patch.object(self.client, "ensure_board") as mock_board, patch.object(
+            self.client,
+            "_build_enqueue_payload",
+            return_value=(payload, graph_info, 202),
+        ) as mock_prepare, patch(
+            "requests.post",
+            return_value=DummyResponse({"batch": {"batch_id": "batch-7"}}),
+        ):
+            result = self.client.submit_image_generation(
+                model=model,
+                prompt="aurora",
+                negative_prompt="",
+                width=512,
+                height=512,
+                steps=40,
+                cfg_scale=8.0,
+                scheduler="euler",
+                seed=99,
+                board_name="TerminalAI",
+                board_id="board-explicit",
+            )
+
+        mock_board.assert_not_called()
+        mock_prepare.assert_called_once_with(
+            model=model,
+            prompt="aurora",
+            negative_prompt="",
+            width=512,
+            height=512,
+            steps=40,
+            cfg_scale=8.0,
+            scheduler="euler",
+            seed=99,
+            board_id="board-explicit",
+            board_name="TerminalAI",
+        )
+        self.assertEqual(result["seed"], 202)
 
 if __name__ == "__main__":
     unittest.main()
