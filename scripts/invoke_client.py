@@ -1525,7 +1525,7 @@ class InvokeAIClient:
             batch_payload["data"] = graph_info["data"]
         if normalized_board_id:
             batch_payload["board_id"] = normalized_board_id
-        if normalized_board_name:
+        elif normalized_board_name:
             batch_payload["board_name"] = normalized_board_name
 
         body = {
