@@ -678,11 +678,25 @@ class InvokeAIClient:
         scheduler: str = DEFAULT_SCHEDULER,
         seed: Optional[int] = None,
         board_name: Optional[str] = None,
+        board_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit a generation request and return queue identifiers."""
 
-        board_id, normalized_board = self._resolve_board_reference(board_name, create=True)
-        board_label = normalized_board or None
+        normalized_board_id = self._normalize_board_id(board_id)
+        normalized_board_name = self._normalize_board_name(board_name)
+        board_label = normalized_board_name or None
+
+        if normalized_board_id:
+            if board_label:
+                self._cache_board_id(board_label, normalized_board_id)
+        elif normalized_board_name:
+            resolved_id, normalized_board = self._resolve_board_reference(
+                normalized_board_name, create=True
+            )
+            normalized_board_id = self._normalize_board_id(resolved_id)
+            board_label = normalized_board or None
+        else:
+            board_label = None
 
         payload, graph_info, seed_value = self._build_enqueue_payload(
             model=model,
@@ -694,7 +708,7 @@ class InvokeAIClient:
             cfg_scale=cfg_scale,
             scheduler=scheduler,
             seed=seed,
-            board_id=board_id,
+            board_id=normalized_board_id,
             board_name=board_label,
         )
 
