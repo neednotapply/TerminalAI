@@ -1492,6 +1492,12 @@ class InvokeAIClient:
             raise InvokeAIClientError("Prompt must not be empty")
 
         seed_value = seed if seed is not None else random.randint(0, 2**31 - 1)
+        normalized_board_id = self._normalize_board_id(board_id)
+        normalized_board_name = self._normalize_board_name(board_name)
+        graph_board_name = (
+            normalized_board_name if not normalized_board_id else None
+        )
+
         graph_info = self._build_graph(
             model=model,
             prompt=prompt,
@@ -1502,8 +1508,8 @@ class InvokeAIClient:
             cfg_scale=cfg_scale,
             scheduler=scheduler,
             seed=seed_value,
-            board_id=board_id,
-            board_name=board_name,
+            board_id=normalized_board_id,
+            board_name=graph_board_name,
         )
 
         batch_payload: Dict[str, Any] = {
@@ -1514,10 +1520,10 @@ class InvokeAIClient:
         }
         if graph_info.get("data") is not None:
             batch_payload["data"] = graph_info["data"]
-        if board_id:
-            batch_payload["board_id"] = board_id
-        if board_name:
-            batch_payload["board_name"] = board_name
+        if normalized_board_id:
+            batch_payload["board_id"] = normalized_board_id
+        if normalized_board_name:
+            batch_payload["board_name"] = normalized_board_name
 
         body = {
             "prepend": False,
@@ -2214,10 +2220,22 @@ class InvokeAIClient:
             },
         }
 
-        if board_id:
-            nodes["save_image"]["board_id"] = board_id
-        if board_name:
-            nodes["save_image"]["board_name"] = board_name
+        board_reference: Optional[Dict[str, Any]] = None
+        normalized_board_id = self._normalize_board_id(board_id)
+        if normalized_board_id:
+            board_reference = {"board_id": normalized_board_id}
+        else:
+            normalized_board_name = self._normalize_board_name(board_name)
+            if normalized_board_name:
+                fallback_id, _ = self._resolve_board_reference(
+                    normalized_board_name, create=False
+                )
+                fallback_board_id = self._normalize_board_id(fallback_id)
+                if fallback_board_id:
+                    board_reference = {"board_id": fallback_board_id}
+
+        if board_reference:
+            nodes["save_image"]["board"] = board_reference
 
         edges: List[Dict[str, Dict[str, str]]] = []
         if use_clip_skip:
@@ -2503,10 +2521,22 @@ class InvokeAIClient:
             },
         }
 
-        if board_id:
-            nodes["save_image"]["board_id"] = board_id
-        if board_name:
-            nodes["save_image"]["board_name"] = board_name
+        board_reference: Optional[Dict[str, Any]] = None
+        normalized_board_id = self._normalize_board_id(board_id)
+        if normalized_board_id:
+            board_reference = {"board_id": normalized_board_id}
+        else:
+            normalized_board_name = self._normalize_board_name(board_name)
+            if normalized_board_name:
+                fallback_id, _ = self._resolve_board_reference(
+                    normalized_board_name, create=False
+                )
+                fallback_board_id = self._normalize_board_id(fallback_id)
+                if fallback_board_id:
+                    board_reference = {"board_id": fallback_board_id}
+
+        if board_reference:
+            nodes["save_image"]["board"] = board_reference
 
         edges = [
             {
