@@ -236,13 +236,48 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         )
 
         nodes = info["graph"]["nodes"]
-        self.assertEqual(nodes["save_image"].get("board"), {"board_id": "board-123"})
+        self.assertEqual(
+            nodes["save_image"].get("board"),
+            {"board_id": "board-123", "board_name": "TerminalAI"},
+        )
         self.assertIn(
             {
                 "source": {"node_id": "latents_to_image", "field": "image"},
                 "destination": {"node_id": "save_image", "field": "image"},
             },
             info["graph"]["edges"],
+        )
+
+    def test_build_enqueue_payload_includes_board_name_with_id(self):
+        model = InvokeAIModel(
+            name="test-sd",
+            base="sd-1",
+            key=None,
+            raw={"base": "sd-1", "type": "main"},
+        )
+
+        payload, graph_info, seed_value = self.client._build_enqueue_payload(
+            model=model,
+            prompt="forest", 
+            negative_prompt="",
+            width=512,
+            height=512,
+            steps=20,
+            cfg_scale=7.5,
+            scheduler="euler",
+            seed=123,
+            board_id="board-55",
+            board_name="TerminalAI",
+        )
+
+        self.assertEqual(seed_value, 123)
+        batch = payload["batch"]
+        self.assertEqual(batch["board_id"], "board-55")
+        self.assertEqual(batch["board_name"], "TerminalAI")
+        save_node_board = graph_info["graph"]["nodes"]["save_image"].get("board")
+        self.assertEqual(
+            save_node_board,
+            {"board_id": "board-55", "board_name": "TerminalAI"},
         )
 
 
