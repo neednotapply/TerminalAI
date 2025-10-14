@@ -13,7 +13,7 @@ import socket
 import subprocess
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from pathlib import Path
 from rain import rain
 from invoke_client import (
@@ -223,8 +223,87 @@ COLUMN_ORDER = {
 CONV_DIR = DATA_DIR / "conversations"
 LOG_DIR = DATA_DIR / "logs"
 
+MODEL_CAPABILITIES_FILE = DATA_DIR / "model_capabilities.json"
 MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {}
 EMBED_MODEL_KEYWORDS = ("embed", "embedding")
+
+
+def _utcnow_iso() -> str:
+    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _ensure_model_entry(name: str) -> Tuple[Dict[str, Any], bool]:
+    info = MODEL_CAPABILITIES.setdefault(name, {})
+    changed = False
+    if "first_seen" not in info:
+        info["first_seen"] = _utcnow_iso()
+        changed = True
+    return info, changed
+
+
+def _load_model_capabilities() -> None:
+    global MODEL_CAPABILITIES
+    try:
+        with MODEL_CAPABILITIES_FILE.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        if DEBUG_MODE:
+            print(f"{YELLOW}Failed to load model capabilities: {exc}{RESET}")
+        return
+
+    if not isinstance(data, dict):
+        return
+
+    cleaned: Dict[str, Dict[str, Any]] = {}
+    for name, info in data.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(info, dict):
+            continue
+        entry: Dict[str, Any] = {}
+        for key in ("is_embedding", "confirmed", "inferred"):
+            value = info.get(key)
+            if isinstance(value, bool):
+                entry[key] = value
+        for key in ("first_seen", "updated_at"):
+            value = info.get(key)
+            if isinstance(value, str):
+                entry[key] = value
+        cleaned[name] = entry
+
+    MODEL_CAPABILITIES.clear()
+    MODEL_CAPABILITIES.update(cleaned)
+
+
+def _save_model_capabilities() -> None:
+    try:
+        MODEL_CAPABILITIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload: Dict[str, Dict[str, Any]] = {}
+        for name, info in MODEL_CAPABILITIES.items():
+            if not isinstance(name, str) or not name:
+                continue
+            if not isinstance(info, dict):
+                continue
+            entry: Dict[str, Any] = {}
+            for key in ("is_embedding", "confirmed", "inferred"):
+                value = info.get(key)
+                if isinstance(value, bool):
+                    entry[key] = value
+            for key in ("first_seen", "updated_at"):
+                value = info.get(key)
+                if isinstance(value, str):
+                    entry[key] = value
+            payload[name] = entry
+        with MODEL_CAPABILITIES_FILE.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+    except OSError as exc:
+        if DEBUG_MODE:
+            print(f"{YELLOW}Failed to save model capabilities: {exc}{RESET}")
+
+
+_load_model_capabilities()
 
 
 def _has_embedding_keyword(value: Any) -> bool:
@@ -235,8 +314,10 @@ def _has_embedding_keyword(value: Any) -> bool:
 
 
 def update_model_capabilities_from_metadata(name: str, metadata: Dict[str, Any]) -> None:
-    info = MODEL_CAPABILITIES.setdefault(name, {})
-    if info.get("is_embedding"):
+    info, changed = _ensure_model_entry(name)
+    if info.get("is_embedding") and info.get("confirmed"):
+        if changed:
+            _save_model_capabilities()
         return
 
     detected = False
@@ -268,16 +349,25 @@ def update_model_capabilities_from_metadata(name: str, metadata: Dict[str, Any])
                         break
 
     if detected:
-        info["is_embedding"] = True
-        info["confirmed"] = True
-        info.pop("inferred", None)
+        mark_model_as_embedding(name)
+    elif changed:
+        _save_model_capabilities()
 
 
 def mark_model_as_embedding(name: str) -> None:
-    info = MODEL_CAPABILITIES.setdefault(name, {})
-    info["is_embedding"] = True
-    info["confirmed"] = True
-    info.pop("inferred", None)
+    info, changed = _ensure_model_entry(name)
+    if not info.get("is_embedding"):
+        info["is_embedding"] = True
+        changed = True
+    if not info.get("confirmed"):
+        info["confirmed"] = True
+        changed = True
+    if "inferred" in info:
+        info.pop("inferred")
+        changed = True
+    if changed:
+        info["updated_at"] = _utcnow_iso()
+        _save_model_capabilities()
 
 
 def is_embedding_model(name: str) -> bool:
@@ -285,9 +375,16 @@ def is_embedding_model(name: str) -> bool:
     if info and info.get("is_embedding"):
         return True
     if _has_embedding_keyword(name):
-        info = MODEL_CAPABILITIES.setdefault(name, {})
-        info["is_embedding"] = True
-        info.setdefault("inferred", True)
+        info, changed = _ensure_model_entry(name)
+        if not info.get("is_embedding"):
+            info["is_embedding"] = True
+            changed = True
+        if not info.get("inferred"):
+            info["inferred"] = True
+            changed = True
+        if changed:
+            info["updated_at"] = _utcnow_iso()
+            _save_model_capabilities()
         return True
     return False
 
@@ -2168,6 +2265,13 @@ def fetch_models():
             elif isinstance(m, str):
                 models.append(m)
         models = [m for m in models if m]
+        seen_changes = False
+        for model_name in models:
+            _, created = _ensure_model_entry(model_name)
+            if created:
+                seen_changes = True
+        if seen_changes:
+            _save_model_capabilities()
         try:
             tags_resp = requests.get(f"{SERVER_URL}/api/tags", timeout=5)
             tags_resp.raise_for_status()
@@ -2487,7 +2591,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             resp = None
             server_failed = False
             timed_out = False
-            used_embeddings = False
+            embedding_only = False
             timeout_val = REQUEST_TIMEOUT * (len(messages) + 1)
 
             chat_paths = [
@@ -2597,22 +2701,21 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
 
             if not resp:
                 if embedding_candidate:
-                    embed_resp, embed_failed, embed_timeout = try_embeddings_request(
-                        model, user_input, headers, timeout_val
-                    )
-                    if embed_resp:
-                        resp = embed_resp
-                        used_embeddings = True
-                        server_failed = False
-                    server_failed = server_failed or embed_failed
-                    timed_out = timed_out or embed_timeout
-
-                if not resp:
+                    embedding_only = True
+                    mark_model_as_embedding(model)
+                else:
                     print(f"{RED}[Error] No response{RESET}")
                     if not server_failed:
                         server_failed = True
 
             elapsed = stop_thinking_timer(start, stop_event, timed_out)
+
+            if embedding_only:
+                print(
+                    f"{YELLOW}Model '{model}' appears to be embedding-only and cannot be used for chat.{RESET}"
+                )
+                get_input(f"{CYAN}Press Enter to choose another model{RESET}")
+                return "embedding_only"
 
             if server_failed:
                 try:
@@ -2637,17 +2740,14 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                 # history and live conversation share the same
                 # formatting: a thinking line followed by the reply.
                 render_markdown(resp)
-                if used_embeddings:
-                    history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
-                else:
-                    if conv_file is None:
-                        conv_file = create_conversation_file(model, user_input)
-                    messages.append({"role": "user", "content": user_input})
-                    messages.append(
-                        {"role": "assistant", "content": resp, "elapsed": elapsed}
-                    )
-                    history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
-                    save_conversation(model, conv_file, messages, context)
+                if conv_file is None:
+                    conv_file = create_conversation_file(model, user_input)
+                messages.append({"role": "user", "content": user_input})
+                messages.append(
+                    {"role": "assistant", "content": resp, "elapsed": elapsed}
+                )
+                history.append({"user": user_input, "ai": resp, "elapsed": elapsed})
+                save_conversation(model, conv_file, messages, context)
 
     except KeyboardInterrupt:
         print(f"{YELLOW}Session interrupted{RESET}")
@@ -2714,6 +2814,18 @@ def run_chat_mode():
             if chosen is None:
                 clear_screen()
                 break
+            embedding_info = MODEL_CAPABILITIES.get(chosen, {})
+            embedding_confirmed = bool(embedding_info.get("confirmed"))
+            embedding_detected = embedding_confirmed or is_embedding_model(chosen)
+            if embedding_detected:
+                clear_screen()
+                mark_model_as_embedding(chosen)
+                print(
+                    f"{YELLOW}Model '{chosen}' is an embedding model and cannot be used for chat.{RESET}"
+                )
+                get_input(f"{CYAN}Press Enter to choose another model{RESET}")
+                clear_screen()
+                continue
             clear_screen()
             while True:
                 if has_conversations(chosen):
@@ -2734,6 +2846,9 @@ def run_chat_mode():
                 if result == "server_inactive":
                     conv_file = "server_inactive"
                     break
+                if result == "embedding_only":
+                    conv_file = "embedding_only"
+                    break
                 if result == "exit":
                     sys.exit(0)
                 else:
@@ -2744,6 +2859,9 @@ def run_chat_mode():
             if conv_file == "server_inactive":
                 clear_screen()
                 break
+            if conv_file == "embedding_only":
+                clear_screen()
+                continue
             break
 
 
