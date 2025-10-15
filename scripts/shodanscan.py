@@ -61,6 +61,11 @@ except ImportError:  # pragma: no cover - fallback for packaging edge cases
 
     STATIC_MODEL_ENDPOINTS = _build_static_model_endpoints()
 
+try:
+    from automatic1111_client import Automatic1111Client, Automatic1111ClientError
+except ImportError:  # pragma: no cover - fallback for package imports
+    from .automatic1111_client import Automatic1111Client, Automatic1111ClientError
+
 urllib3.disable_warnings(InsecureRequestWarning)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -68,9 +73,11 @@ DATA_DIR = BASE_DIR / "data"
 LEGACY_CSV_PATH = DATA_DIR / "endpoints.csv"
 OLLAMA_CSV_PATH = DATA_DIR / "ollama.endpoints.csv"
 INVOKE_CSV_PATH = DATA_DIR / "invoke.endpoints.csv"
+AUTOMATIC1111_CSV_PATH = DATA_DIR / "automatic1111.endpoints.csv"
 CSV_PATHS = {
     "ollama": OLLAMA_CSV_PATH,
     "invokeai": INVOKE_CSV_PATH,
+    "automatic1111": AUTOMATIC1111_CSV_PATH,
 }
 CONFIG_PATH = DATA_DIR / "config.json"
 SHODAN_QUERIES = [
@@ -83,6 +90,11 @@ SHODAN_QUERIES = [
         "query": 'title:"Invoke - Community Edition"',
         "api_type": "invokeai",
         "default_port": 9090,
+    },
+    {
+        "query": 'title:"Stable Diffusion web UI"',
+        "api_type": "automatic1111",
+        "default_port": 7860,
     },
 ]
 
@@ -111,6 +123,7 @@ BASE_COLUMNS = [
 COLUMN_ORDER = {
     "ollama": BASE_COLUMNS,
     "invokeai": BASE_COLUMNS + ["available_models"],
+    "automatic1111": BASE_COLUMNS + ["available_models"],
 }
 
 
@@ -501,6 +514,45 @@ def check_invoke_api(ip, port, hostname=None):
     return False, last_error or "version check failed", []
 
 
+def check_automatic1111_api(ip, port, hostname=None):
+    """Check that the Automatic1111 API responds and gather available models."""
+
+    candidates: List[str] = []
+    if hostname:
+        candidates.append(str(hostname))
+    candidates.append(str(ip))
+
+    last_error = ""
+    tried: set[Tuple[str, str]] = set()
+
+    for target in candidates:
+        for scheme in ("http", "https"):
+            key = (target, scheme)
+            if key in tried:
+                continue
+            tried.add(key)
+
+            client = Automatic1111Client(target, int(port), nickname=target, scheme=scheme)
+            try:
+                models = client.list_models()
+            except requests.exceptions.SSLError as exc:
+                last_error = str(exc)
+                continue
+            except (Automatic1111ClientError, requests.RequestException) as exc:
+                last_error = str(exc)
+                continue
+
+            names: List[str] = []
+            for model in models:
+                title = getattr(model, "title", "") or getattr(model, "name", "")
+                if title:
+                    names.append(str(title))
+
+            return True, "", names
+
+    return False, last_error or "model query failed", []
+
+
 def update_existing(api, df, batch_size, api_type):
     if df.empty:
         return df
@@ -574,6 +626,10 @@ def update_existing(api, df, batch_size, api_type):
         )
         if api_type == "invokeai":
             api_ok, reason, models = check_invoke_api(ip, port, hostname=hostname)
+        elif api_type == "automatic1111":
+            api_ok, reason, models = check_automatic1111_api(
+                ip, port, hostname=hostname
+            )
         else:
             api_ok, reason, models = check_ollama_api(ip, port, hostname=hostname)
         df.at[idx, "is_active"] = api_ok
@@ -659,6 +715,10 @@ def find_new(api, df, query_info, limit):
                 api_ok, reason, models = check_invoke_api(
                     row["ip"], row["port"], hostname=hostname
                 )
+            elif api_type == "automatic1111":
+                api_ok, reason, models = check_automatic1111_api(
+                    row["ip"], row["port"], hostname=hostname
+                )
             else:
                 api_ok, reason, models = check_ollama_api(
                     row["ip"], row["port"], hostname=hostname
@@ -682,7 +742,7 @@ def find_new(api, df, query_info, limit):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Discover and verify Ollama and InvokeAI endpoints via Shodan"
+        description="Discover and verify Ollama, InvokeAI, and Automatic1111 endpoints via Shodan"
     )
     parser.add_argument(
         "--debug",
