@@ -289,6 +289,70 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             info["graph"]["edges"],
         )
 
+    def test_build_flux_graph_structure(self):
+        model = InvokeAIModel(
+            name="flux-dev",
+            base="flux",
+            key=None,
+            raw={"base": "flux", "type": "main", "name": "Flux.1 dev"},
+        )
+
+        info = self.client._build_graph(
+            model=model,
+            prompt="city skyline",
+            negative_prompt="low quality",
+            width=1024,
+            height=768,
+            steps=25,
+            cfg_scale=3.5,
+            scheduler="flux-default",
+            seed=4242,
+            board_id="board-flux",
+            board_name="TerminalAI",
+        )
+
+        self.assertEqual(info["graph"]["id"], "terminal_flux_graph")
+        nodes = info["graph"]["nodes"]
+        self.assertEqual(nodes["model_loader"]["type"], "flux_model_loader")
+        self.assertEqual(nodes["denoise"]["type"], "flux_denoise")
+        self.assertEqual(nodes["vae_decode"]["type"], "flux_vae_decode")
+        self.assertEqual(nodes["save_image"]["type"], "save_image")
+
+        metadata = nodes["save_image"]["metadata"]
+        self.assertEqual(metadata.get("prompt"), "city skyline")
+        self.assertEqual(metadata.get("negative_prompt"), "low quality")
+        self.assertEqual(metadata.get("seed"), 4242)
+        self.assertEqual(metadata.get("width"), 1024)
+        self.assertEqual(metadata.get("height"), 768)
+        self.assertEqual(metadata.get("steps"), 25)
+        self.assertEqual(metadata.get("cfg_scale"), 3.5)
+        self.assertEqual(metadata.get("guidance"), 3.5)
+        self.assertEqual(metadata.get("scheduler"), "flux-default")
+        self.assertEqual(
+            nodes["save_image"].get("board"),
+            {"board_id": "board-flux", "board_name": "TerminalAI"},
+        )
+
+        self.assertIn("negative_conditioning", nodes)
+        edges = info["graph"]["edges"]
+        self.assertIn(
+            {
+                "source": {"node_id": "negative_conditioning", "field": "conditioning"},
+                "destination": {
+                    "node_id": "denoise",
+                    "field": "negative_text_conditioning",
+                },
+            },
+            edges,
+        )
+        self.assertIn(
+            {
+                "source": {"node_id": "vae_decode", "field": "image"},
+                "destination": {"node_id": "save_image", "field": "image"},
+            },
+            edges,
+        )
+
     def test_build_enqueue_payload_includes_board_name_with_id(self):
         model = InvokeAIModel(
             name="test-sd",
