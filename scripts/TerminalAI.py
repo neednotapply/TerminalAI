@@ -85,6 +85,7 @@ def _read_escape_sequence() -> str:
 GREEN = "\033[38;2;5;249;0m"
 CYAN = "\033[96m"
 YELLOW = "\033[93m"
+WARNING = "\033[38;2;204;176;0m"
 RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -740,27 +741,56 @@ def get_key():
 
 
 def interactive_menu(header, options):
+    menu_options = []
+    for opt in options:
+        if isinstance(opt, dict):
+            label = str(opt.get("label", ""))
+            style = opt.get("style") or opt.get("color")
+        elif isinstance(opt, (list, tuple)):
+            if not opt:
+                label = ""
+                style = None
+            else:
+                label = str(opt[0])
+                style = opt[1] if len(opt) > 1 else None
+        else:
+            label = str(opt)
+            style = None
+        menu_options.append({"label": label, "style": style})
+
+    if not menu_options:
+        return None
+
+    color_map = {
+        None: GREEN,
+        "default": GREEN,
+        "warning": WARNING,
+        "danger": RED,
+    }
+
     idx = 0
     offset = 0
+    count = len(menu_options)
+
     while True:
         clear_screen()
         print(f"{GREEN}{header}{RESET}")
         rows = shutil.get_terminal_size(fallback=(80, 24)).lines
         view_height = max(1, rows - 2)
         end = offset + view_height
-        visible = options[offset:end]
+        visible = menu_options[offset:end]
         for i, opt in enumerate(visible):
             actual = offset + i
-            marker = f"{GREEN}> {RESET}" if actual == idx else "  "
-            line = (
-                f"{BOLD}{GREEN}{opt}{RESET}" if actual == idx else f"{GREEN}{opt}{RESET}"
-            )
-            print(f"{marker}{line}")
+            prefix = "> " if actual == idx else "  "
+            style = opt.get("style")
+            color = color_map.get(style, GREEN)
+            bold = BOLD if actual == idx else ""
+            print(f"{bold}{color}{prefix}{opt['label']}{RESET}")
         key = get_key()
         if key == "UP":
-            idx = (idx - 1) % len(options)
+            idx = (idx - 1) % count
         elif key == "DOWN":
-            idx = (idx + 1) % len(options)
+            idx = (idx + 1) % count
         elif key in ("ENTER", "SPACE"):
             return idx
         elif key == "ESC":
@@ -2547,7 +2577,10 @@ def select_server(servers, allow_back=False):
         for i, s in enumerate(servers, 1):
             ping_val = s.get("ping", float("inf"))
             ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
-            print(f"{GREEN}{i}. {s['nickname']} ({s['ip']}) - {ping_str}{RESET}")
+            color = WARNING if ping_str == "?" else GREEN
+            print(f"{color}{i}. {s['nickname']} ({s['ip']}) - {ping_str}{RESET}")
+        if allow_back:
+            print(f"{GREEN}0. [Back]{RESET}")
         while True:
             c = get_input(f"{CYAN}Select server: {RESET}")
             if c == "ESC":
@@ -2558,6 +2591,8 @@ def select_server(servers, allow_back=False):
                     sys.exit(0)
                 else:
                     continue
+            if allow_back and c == "0":
+                return None
             if c.isdigit() and 1 <= int(c) <= len(servers):
                 return servers[int(c) - 1]
             print(f"{RED}Invalid selection{RESET}")
@@ -2566,7 +2601,10 @@ def select_server(servers, allow_back=False):
         for s in servers:
             ping_val = s.get("ping", float("inf"))
             ping_str = "?" if ping_val == float("inf") else f"{ping_val:.1f} ms"
-            options.append(f"{s['nickname']} ({s['ip']}) - {ping_str}")
+            style = "warning" if ping_str == "?" else "default"
+            options.append({"label": f"{s['nickname']} ({s['ip']}) - {ping_str}", "style": style})
+        if allow_back:
+            options.append({"label": "[Back]"})
         while True:
             choice = interactive_menu("Available Servers:", options)
             if choice is None:
@@ -2576,6 +2614,8 @@ def select_server(servers, allow_back=False):
                     sys.exit(0)
                 else:
                     continue
+            if allow_back and choice == len(options) - 1:
+                return None
             return servers[choice]
 
 def select_model(models):

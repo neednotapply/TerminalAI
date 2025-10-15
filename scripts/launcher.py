@@ -9,6 +9,7 @@ import time
 
 GREEN = "\033[38;2;5;249;0m"
 RESET = "\033[0m"
+BOLD = "\033[1m"
 
 HEADER_LINES = [
     "████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗      █████╗ ██╗",
@@ -88,6 +89,103 @@ def run_verbose() -> int | None:
         return None
     idx = int(choice) - 1
     return idx if 0 <= idx < len(OPTIONS) else None
+
+
+def _arrow_menu(header: str, labels: list[str]) -> int | None:
+    """Simple arrow-key menu without matrix rain effects."""
+
+    if not labels:
+        return None
+
+    if os.name == "nt":
+
+        def read_key() -> str | None:
+            while True:
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    return "ENTER"
+                if ch == "\x1b":
+                    return "ESC"
+                if ch in ("\x00", "\xe0"):
+                    ch2 = msvcrt.getwch()
+                    if ch2 == "H":
+                        return "UP"
+                    if ch2 == "P":
+                        return "DOWN"
+                elif ch == " ":
+                    return "ENTER"
+
+        idx = 0
+        while True:
+            os.system("cls")
+            print(f"{GREEN}{header}{RESET}")
+            for i, label in enumerate(labels):
+                prefix = "> " if i == idx else "  "
+                style = BOLD if i == idx else ""
+                print(f"{style}{GREEN}{prefix}{label}{RESET}")
+            key = read_key()
+            if key == "UP":
+                idx = (idx - 1) % len(labels)
+            elif key == "DOWN":
+                idx = (idx + 1) % len(labels)
+            elif key == "ENTER":
+                return idx
+            elif key == "ESC":
+                return None
+
+    else:
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+
+        def read_key() -> str | None:
+            while True:
+                r, _, _ = select.select([sys.stdin], [], [], None)
+                if not r:
+                    continue
+                ch = os.read(fd, 1).decode()
+                if not ch:
+                    return None
+                if ch in ("\n", "\r"):
+                    return "ENTER"
+                if ch == " ":
+                    return "ENTER"
+                if ch == "\x1b":
+                    r2, _, _ = select.select([sys.stdin], [], [], 0.01)
+                    if not r2:
+                        return "ESC"
+                    ch2 = os.read(fd, 1).decode()
+                    if ch2 == "[":
+                        ch3 = os.read(fd, 1).decode()
+                        if ch3 == "A":
+                            return "UP"
+                        if ch3 == "B":
+                            return "DOWN"
+                    return "ESC"
+
+        idx = 0
+        try:
+            while True:
+                os.system("clear")
+                print(f"{GREEN}{header}{RESET}")
+                for i, label in enumerate(labels):
+                    prefix = "> " if i == idx else "  "
+                    style = BOLD if i == idx else ""
+                    print(f"{style}{GREEN}{prefix}{label}{RESET}")
+                key = read_key()
+                if key == "UP":
+                    idx = (idx - 1) % len(labels)
+                elif key == "DOWN":
+                    idx = (idx + 1) % len(labels)
+                elif key == "ENTER":
+                    return idx
+                elif key == "ESC":
+                    return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    return None
 
 
 def run_windows_menu() -> int | None:
@@ -255,22 +353,28 @@ def prompt_provider_menu(category_key: str) -> dict | None:
     labels = [opt["label"] for opt in options]
 
     while True:
-        if not DEBUG_MODE:
-            os.system("cls" if os.name == "nt" else "clear")
-        print(f"{GREEN}{header}{RESET}")
-        for idx, label in enumerate(labels, 1):
-            print(f"{GREEN}{idx}) {label}{RESET}")
-        try:
-            choice = input(f"{GREEN}> {RESET}").strip()
-        except EOFError:
-            return None
-        if not choice:
-            return None
-        if not choice.isdigit():
-            print("Invalid selection. Please choose a valid option.")
-            time.sleep(0.8)
-            continue
-        index = int(choice) - 1
+        if DEBUG_MODE:
+            if not labels:
+                return None
+            print(f"{GREEN}{header}{RESET}")
+            for idx, label in enumerate(labels, 1):
+                print(f"{GREEN}{idx}) {label}{RESET}")
+            try:
+                choice = input(f"{GREEN}> {RESET}").strip()
+            except EOFError:
+                return None
+            if not choice:
+                return None
+            if not choice.isdigit():
+                print("Invalid selection. Please choose a valid option.")
+                time.sleep(0.8)
+                continue
+            index = int(choice) - 1
+        else:
+            index = _arrow_menu(header, labels)
+            if index is None:
+                return None
+
         if 0 <= index < len(options):
             selected = options[index]
             if selected.get("key") == "back":
