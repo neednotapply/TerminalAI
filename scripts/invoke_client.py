@@ -2177,7 +2177,8 @@ class InvokeAIClient:
         board_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         base = model.base.lower()
-        if base in {"sd-1", "sd1", "sd-2", "sd2", "stable-diffusion-1", "stable-diffusion-2"}:
+        normalized_base = base.replace("_", "-")
+        if normalized_base in {"sd-1", "sd1", "sd-2", "sd2", "stable-diffusion-1", "stable-diffusion-2"}:
             return self._build_sd_graph(
                 model.raw,
                 prompt,
@@ -2191,7 +2192,7 @@ class InvokeAIClient:
                 board_id,
                 board_name,
             )
-        if base in {"sdxl", "sdxl-refiner", "stable-diffusion-xl"}:
+        if normalized_base in {"sdxl", "sdxl-refiner", "stable-diffusion-xl"}:
             return self._build_sdxl_graph(
                 model.raw,
                 prompt,
@@ -2205,7 +2206,23 @@ class InvokeAIClient:
                 board_id,
                 board_name,
             )
-        raise InvokeAIClientError(f"Unsupported InvokeAI base model: {base or 'unknown'}")
+        if normalized_base.startswith("flux"):
+            return self._build_flux_graph(
+                model.raw,
+                prompt,
+                negative_prompt,
+                width,
+                height,
+                steps,
+                cfg_scale,
+                scheduler,
+                seed,
+                board_id,
+                board_name,
+            )
+        raise InvokeAIClientError(
+            f"Unsupported InvokeAI base model: {normalized_base or 'unknown'}"
+        )
 
     def _build_sd_graph(
         self,
@@ -2678,6 +2695,179 @@ class InvokeAIClient:
                 "destination": {"node_id": "save_image", "field": "image"},
             },
         ]
+
+        graph = {"id": graph_id, "nodes": nodes, "edges": edges}
+        return {"graph": graph, "data": None, "output": "save_image"}
+
+    def _build_flux_graph(
+        self,
+        model_cfg: Dict[str, Any],
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        scheduler: str,
+        seed: int,
+        board_id: Optional[str] = None,
+        board_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        graph_id = "terminal_flux_graph"
+        model_identifiers = {
+            key: model_cfg.get(key)
+            for key in ("key", "hash", "name", "base", "type")
+            if model_cfg.get(key) is not None
+        }
+        metadata: Dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "guidance": cfg_scale,
+            "scheduler": scheduler,
+        }
+        if model_identifiers:
+            metadata["model"] = model_identifiers
+
+        nodes: Dict[str, Dict[str, Any]] = {
+            "model_loader": {
+                "id": "model_loader",
+                "type": "flux_model_loader",
+                "model": model_cfg,
+            },
+            "positive_conditioning": {
+                "id": "positive_conditioning",
+                "type": "flux_text_encoder",
+                "prompt": prompt,
+                "t5_max_seq_len": model_cfg.get("max_seq_len", 256),
+            },
+            "denoise": {
+                "id": "denoise",
+                "type": "flux_denoise",
+                "guidance": cfg_scale,
+                "num_steps": steps,
+                "width": width,
+                "height": height,
+                "denoising_start": 0.0,
+                "denoising_end": 1.0,
+                "seed": seed,
+            },
+            "vae_decode": {
+                "id": "vae_decode",
+                "type": "flux_vae_decode",
+                "metadata": metadata,
+            },
+            "save_image": {
+                "id": "save_image",
+                "type": "save_image",
+                "metadata": metadata,
+            },
+        }
+
+        board_reference: Optional[Dict[str, Any]] = None
+        normalized_board_id = self._normalize_board_id(board_id)
+        normalized_board_name = self._normalize_board_name(board_name)
+        if normalized_board_id:
+            board_reference = {"board_id": normalized_board_id}
+            if normalized_board_name:
+                board_reference["board_name"] = normalized_board_name
+        else:
+            if normalized_board_name:
+                fallback_id, _ = self._resolve_board_reference(
+                    normalized_board_name, create=False
+                )
+                fallback_board_id = self._normalize_board_id(fallback_id)
+                if fallback_board_id:
+                    board_reference = {"board_id": fallback_board_id}
+                    board_reference["board_name"] = normalized_board_name
+
+        if board_reference:
+            nodes["save_image"]["board"] = board_reference
+
+        edges: List[Dict[str, Dict[str, str]]] = [
+            {
+                "source": {"node_id": "model_loader", "field": "clip"},
+                "destination": {"node_id": "positive_conditioning", "field": "clip"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "t5_encoder"},
+                "destination": {"node_id": "positive_conditioning", "field": "t5_encoder"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "max_seq_len"},
+                "destination": {"node_id": "positive_conditioning", "field": "t5_max_seq_len"},
+            },
+            {
+                "source": {"node_id": "positive_conditioning", "field": "conditioning"},
+                "destination": {
+                    "node_id": "denoise",
+                    "field": "positive_text_conditioning",
+                },
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "transformer"},
+                "destination": {"node_id": "denoise", "field": "transformer"},
+            },
+            {
+                "source": {"node_id": "denoise", "field": "latents"},
+                "destination": {"node_id": "vae_decode", "field": "latents"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "vae"},
+                "destination": {"node_id": "vae_decode", "field": "vae"},
+            },
+            {
+                "source": {"node_id": "vae_decode", "field": "image"},
+                "destination": {"node_id": "save_image", "field": "image"},
+            },
+        ]
+
+        if negative_prompt:
+            nodes["negative_conditioning"] = {
+                "id": "negative_conditioning",
+                "type": "flux_text_encoder",
+                "prompt": negative_prompt,
+                "t5_max_seq_len": model_cfg.get("max_seq_len", 256),
+            }
+            edges.extend(
+                [
+                    {
+                        "source": {"node_id": "model_loader", "field": "clip"},
+                        "destination": {
+                            "node_id": "negative_conditioning",
+                            "field": "clip",
+                        },
+                    },
+                    {
+                        "source": {"node_id": "model_loader", "field": "t5_encoder"},
+                        "destination": {
+                            "node_id": "negative_conditioning",
+                            "field": "t5_encoder",
+                        },
+                    },
+                    {
+                        "source": {"node_id": "model_loader", "field": "max_seq_len"},
+                        "destination": {
+                            "node_id": "negative_conditioning",
+                            "field": "t5_max_seq_len",
+                        },
+                    },
+                    {
+                        "source": {
+                            "node_id": "negative_conditioning",
+                            "field": "conditioning",
+                        },
+                        "destination": {
+                            "node_id": "denoise",
+                            "field": "negative_text_conditioning",
+                        },
+                    },
+                ]
+            )
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
         return {"graph": graph, "data": None, "output": "save_image"}
