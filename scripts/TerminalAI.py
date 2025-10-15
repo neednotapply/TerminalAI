@@ -13,7 +13,7 @@ import socket
 import subprocess
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from pathlib import Path
 from rain import rain
 from invoke_client import (
@@ -114,25 +114,46 @@ DEBUG_FLAGS = {"--debug", "--verbose"}
 DEBUG_MODE = any(flag in sys.argv for flag in DEBUG_FLAGS)
 
 MODE_ALIASES = {
-    "chat": 0,
-    "llm": 0,
-    "image": 1,
-    "img": 1,
-    "invoke": 1,
-    "invokeai": 1,
+    "chat": "llm-ollama",
+    "llm": "llm",
+    "llm-ollama": "llm-ollama",
+    "image": "image-invokeai",
+    "img": "image-invokeai",
+    "invoke": "image-invokeai",
+    "invokeai": "image-invokeai",
+    "image-invokeai": "image-invokeai",
+    "image-automatic1111": "image-automatic1111",
+    "automatic1111": "image-automatic1111",
+    "a1111": "image-automatic1111",
+    "shodan": "shodan",
+    "scan": "shodan",
 }
-MODE_LABELS = {0: "Chat with Ollama", 1: "Generate Images with InvokeAI"}
+MODE_LABELS = {
+    "llm": "LLM Chat",
+    "llm-ollama": "LLM Chat (Ollama)",
+    "image": "Image Generation",
+    "image-invokeai": "Image Generation (InvokeAI)",
+    "image-automatic1111": "Image Generation (Automatic1111)",
+    "shodan": "Shodan Scan",
+}
 MODE_OVERRIDE = None
 MODE_OVERRIDE_ERROR = None
 
+MODE_DISPATCH: Dict[str, Callable[[], None]] = {}
 
-def _parse_mode_override():
-    """Consume --mode arguments from sys.argv and configure overrides."""
 
-    global MODE_OVERRIDE, MODE_OVERRIDE_ERROR
-    args = sys.argv[1:]
-    cleaned = [sys.argv[0]]
+def _extract_mode_override(argv: List[str]) -> Tuple[List[str], Optional[str], Optional[str]]:
+    """Return cleaned argv, mode override, and error message for a given argv."""
+
+    if not argv:
+        return [], None, None
+
+    program = argv[0]
+    args = list(argv[1:])
+    cleaned = [program]
     i = 0
+    override = None
+    error = None
     while i < len(args):
         arg = args[i]
         value = None
@@ -141,7 +162,7 @@ def _parse_mode_override():
                 value = args[i + 1]
                 i += 2
             else:
-                MODE_OVERRIDE_ERROR = "--mode flag requires a value"
+                error = "--mode flag requires a value"
                 i += 1
                 continue
         elif arg.startswith("--mode="):
@@ -154,16 +175,28 @@ def _parse_mode_override():
 
         key = (value or "").strip().lower()
         if not key:
-            MODE_OVERRIDE_ERROR = "--mode flag requires a value"
-            MODE_OVERRIDE = None
+            error = "--mode flag requires a value"
+            override = None
         elif key in MODE_ALIASES:
-            MODE_OVERRIDE = MODE_ALIASES[key]
-            MODE_OVERRIDE_ERROR = None
+            override = MODE_ALIASES[key]
+            error = None
         else:
-            MODE_OVERRIDE_ERROR = f"Unknown mode '{value}'"
-            MODE_OVERRIDE = None
+            error = f"Unknown mode '{value}'"
+            override = None
 
-    sys.argv[:] = cleaned
+    return cleaned, override, error
+
+
+def _parse_mode_override():
+    """Consume --mode arguments from sys.argv and configure overrides."""
+
+    global MODE_OVERRIDE, MODE_OVERRIDE_ERROR
+
+    cleaned, override, error = _extract_mode_override(sys.argv)
+    if cleaned:
+        sys.argv[:] = cleaned
+    MODE_OVERRIDE = override
+    MODE_OVERRIDE_ERROR = error
 
 
 _parse_mode_override()
@@ -1819,22 +1852,98 @@ def prompt_float(prompt, default, minimum=None, maximum=None):
         return value
 
 
-def choose_mode():
-    options = ["Chat with Ollama", "Generate Images with InvokeAI", "Exit"]
+def _prompt_selection(header: str, options: List[str]) -> Optional[int]:
+    """Prompt the user to choose from a list of options."""
+
     if DEBUG_MODE:
-        print(f"{CYAN}Mode Selection:{RESET}")
+        print(f"{CYAN}{header}{RESET}")
         for idx, opt in enumerate(options, 1):
             print(f"{GREEN}{idx}. {opt}{RESET}")
         while True:
             choice = get_input(f"{CYAN}Choose an option: {RESET}")
             if choice == "ESC":
-                return 2
-            if choice.isdigit() and 1 <= int(choice) <= len(options):
-                return int(choice) - 1
+                return None
+            if choice.isdigit():
+                index = int(choice) - 1
+                if 0 <= index < len(options):
+                    return index
             print(f"{RED}Invalid selection{RESET}")
     else:
-        sel = interactive_menu("Select Mode:", options)
-        return 2 if sel is None else sel
+        sel = interactive_menu(header, options)
+        return sel
+
+
+def choose_mode() -> str:
+    options = [
+        ("LLM Chat", "llm"),
+        ("Image Generation", "image"),
+        ("Shodan Scan", "shodan"),
+        ("[Exit]", "exit"),
+    ]
+    labels = [label for label, _ in options]
+    selection = _prompt_selection("Select Mode:", labels)
+    if selection is None:
+        return "exit"
+    return options[selection][1]
+
+
+def dispatch_mode(mode_key: str) -> bool:
+    """Execute the handler associated with the provided mode key."""
+
+    handler = MODE_DISPATCH.get(mode_key)
+    if handler is None:
+        print(f"{YELLOW}No handler configured for mode '{mode_key}'.{RESET}")
+        return False
+    handler()
+    return True
+
+
+def run_llm_menu() -> None:
+    providers = [("Ollama", "llm-ollama")]
+    labels = [label for label, _ in providers] + ["[Back]"]
+
+    while True:
+        selection = _prompt_selection("Select LLM Provider:", labels)
+        if selection is None or selection == len(labels) - 1:
+            return
+        provider_key = providers[selection][1]
+        dispatch_mode(provider_key)
+        return
+
+
+def run_image_menu() -> None:
+    providers = [
+        ("InvokeAI", "image-invokeai"),
+        ("Automatic1111", "image-automatic1111"),
+    ]
+    labels = [label for label, _ in providers] + ["[Back]"]
+
+    while True:
+        selection = _prompt_selection("Select Image Generation Provider:", labels)
+        if selection is None or selection == len(labels) - 1:
+            return
+        provider_key = providers[selection][1]
+        dispatch_mode(provider_key)
+        return
+
+
+def run_automatic1111_mode() -> None:
+    clear_screen()
+    print(
+        f"{YELLOW}Automatic1111 integration is not yet available in TerminalAI.{RESET}"
+    )
+    get_input(f"{CYAN}Press Enter to return to the menu{RESET}")
+
+
+def run_shodan_scan() -> None:
+    clear_screen()
+    script_path = Path(__file__).resolve().parent / "shodanscan.py"
+    cmd = [sys.executable, str(script_path)] + sys.argv[1:]
+    try:
+        subprocess.call(cmd)
+    finally:
+        if not DEBUG_MODE:
+            clear_screen(True)
 
 
 def load_servers(api_type=None):
@@ -2971,6 +3080,17 @@ def run_image_mode():
 
 
 # Main loop
+MODE_DISPATCH.update(
+    {
+        "llm": run_llm_menu,
+        "llm-ollama": run_chat_mode,
+        "image": run_image_menu,
+        "image-invokeai": run_image_mode,
+        "image-automatic1111": run_automatic1111_mode,
+        "shodan": run_shodan_scan,
+    }
+)
+
 if __name__ == "__main__":
     selected_api = "ollama"
 
@@ -3015,9 +3135,8 @@ if __name__ == "__main__":
     if MODE_OVERRIDE_ERROR:
         print(f"{RED}{MODE_OVERRIDE_ERROR}{RESET}")
     elif MODE_OVERRIDE is not None and DEBUG_MODE:
-        label = MODE_LABELS.get(MODE_OVERRIDE)
-        if label:
-            print(f"{CYAN}Mode override: {label}{RESET}")
+        label = MODE_LABELS.get(MODE_OVERRIDE, MODE_OVERRIDE)
+        print(f"{CYAN}Mode override: {label}{RESET}")
 
     forced_mode = MODE_OVERRIDE
     use_cli_mode = forced_mode is not None
@@ -3028,11 +3147,8 @@ if __name__ == "__main__":
             forced_mode = None
         else:
             mode = choose_mode()
-        if mode == 0:
-            run_chat_mode()
-        elif mode == 1:
-            run_image_mode()
-        else:
+        if not mode or mode == "exit":
             break
+        dispatch_mode(mode)
         if use_cli_mode:
             break
