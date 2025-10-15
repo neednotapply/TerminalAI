@@ -19,24 +19,48 @@ HEADER_LINES = [
     "   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝",
 ]
 
-MENU_OPTIONS = [
-    {
-        "label": "Chat with Ollama",
-        "script": "TerminalAI.py",
-        "extra_args": ["--mode", "chat"],
-    },
-    {
-        "label": "Generate Images with InvokeAI",
-        "script": "TerminalAI.py",
-        "extra_args": ["--mode", "image"],
-    },
-    {
-        "label": "Scan for Servers using Shodan",
-        "script": "shodanscan.py",
-    },
+TOP_LEVEL_OPTIONS = [
+    {"label": "LLM Chat", "key": "llm"},
+    {"label": "Image Generation", "key": "image"},
+    {"label": "Shodan Scan", "key": "shodan"},
+    {"label": "[Exit]", "key": "exit"},
 ]
 
-OPTIONS = [opt["label"] for opt in MENU_OPTIONS]
+PROVIDER_OPTIONS = {
+    "llm": [
+        {
+            "label": "Ollama",
+            "script": "TerminalAI.py",
+            "extra_args": ["--mode", "llm-ollama"],
+            "clear_before": False,
+        },
+        {"label": "[Back]", "key": "back"},
+    ],
+    "image": [
+        {
+            "label": "InvokeAI",
+            "script": "TerminalAI.py",
+            "extra_args": ["--mode", "image-invokeai"],
+        },
+        {
+            "label": "Automatic1111",
+            "script": "TerminalAI.py",
+            "extra_args": ["--mode", "image-automatic1111"],
+        },
+        {"label": "[Back]", "key": "back"},
+    ],
+}
+
+PROVIDER_HEADERS = {
+    "llm": "Select LLM Provider:",
+    "image": "Select Image Generation Provider:",
+}
+
+DIRECT_ACTIONS = {
+    "shodan": {"label": "Shodan Scan", "script": "shodanscan.py"},
+}
+
+OPTIONS = [opt["label"] for opt in TOP_LEVEL_OPTIONS]
 DEBUG_FLAGS = {"--debug", "--verbose"}
 DEBUG_MODE = any(flag in sys.argv for flag in DEBUG_FLAGS)
 
@@ -222,6 +246,59 @@ def run_unix_menu() -> int | None:
     return None
 
 
+def prompt_provider_menu(category_key: str) -> dict | None:
+    options = PROVIDER_OPTIONS.get(category_key, [])
+    if not options:
+        return None
+
+    header = PROVIDER_HEADERS.get(category_key, "Select an option:")
+    labels = [opt["label"] for opt in options]
+
+    while True:
+        if not DEBUG_MODE:
+            os.system("cls" if os.name == "nt" else "clear")
+        print(f"{GREEN}{header}{RESET}")
+        for idx, label in enumerate(labels, 1):
+            print(f"{GREEN}{idx}) {label}{RESET}")
+        try:
+            choice = input(f"{GREEN}> {RESET}").strip()
+        except EOFError:
+            return None
+        if not choice:
+            return None
+        if not choice.isdigit():
+            print("Invalid selection. Please choose a valid option.")
+            time.sleep(0.8)
+            continue
+        index = int(choice) - 1
+        if 0 <= index < len(options):
+            selected = options[index]
+            if selected.get("key") == "back":
+                return None
+            return selected
+        print("Invalid selection. Please choose a valid option.")
+        time.sleep(0.8)
+
+
+def run_selected_option(option: dict, args: list[str], script_dir: str) -> None:
+    if not option:
+        return
+
+    cmd = [sys.executable, os.path.join(script_dir, option["script"])]
+    cmd.extend(option.get("extra_args", []))
+    cmd.extend(args)
+
+    should_clear = option.get("clear_before", True)
+    if should_clear and not DEBUG_MODE:
+        os.system("cls" if os.name == "nt" else "clear")
+
+    try:
+        subprocess.call(cmd)
+    finally:
+        if not DEBUG_MODE:
+            os.system("cls" if os.name == "nt" else "clear")
+
+
 def main() -> None:
     args = sys.argv[1:]
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -235,19 +312,22 @@ def main() -> None:
         if choice is None:
             return
 
-        selected = MENU_OPTIONS[choice]
-        if selected["script"] == "shodanscan.py" or choice != 0:
-            os.system("cls" if os.name == "nt" else "clear")
+        top_option = TOP_LEVEL_OPTIONS[choice]
+        key = top_option.get("key")
 
-        cmd = [sys.executable, os.path.join(script_dir, selected["script"])]
-        cmd.extend(selected.get("extra_args", []))
-        cmd.extend(args)
+        if key == "exit":
+            return
 
-        try:
-            subprocess.call(cmd)
-        finally:
-            if not DEBUG_MODE:
-                os.system("cls" if os.name == "nt" else "clear")
+        if key in PROVIDER_OPTIONS:
+            option = prompt_provider_menu(key)
+            if option is None:
+                continue
+        else:
+            option = DIRECT_ACTIONS.get(key)
+            if option is None:
+                continue
+
+        run_selected_option(option, args, script_dir)
 
 
 if __name__ == "__main__":
