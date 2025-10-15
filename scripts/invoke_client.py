@@ -2,17 +2,22 @@
 from __future__ import annotations
 
 import datetime
-import hashlib
 import math
 import json
 import random
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
+
+from image_cache import (
+    ensure_images_dir,
+    normalize_metadata_value,
+    resolve_cached_paths,
+    write_metadata_file,
+)
 
 DEFAULT_SCHEDULER = "euler"
 DEFAULT_SCHEDULER_OPTIONS: Tuple[str, ...] = (
@@ -128,8 +133,7 @@ class InvokeAIClient:
         self.base_url = self._base_urls[0]
         self._board_cache: Dict[str, str] = {}
         base_data = data_dir if data_dir is not None else Path(__file__).resolve().parent.parent / "data"
-        self.images_dir = Path(base_data) / "images"
-        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.images_dir = ensure_images_dir(Path(base_data))
 
     # ------------------------------------------------------------------
     # Public API
@@ -1974,23 +1978,7 @@ class InvokeAIClient:
     def _resolve_cached_image_paths(self, image_name: str) -> Tuple[Path, Path]:
         """Return the expected cache locations for an image."""
 
-        raw_text = image_name if isinstance(image_name, str) else ""
-        base_name = Path(raw_text).name or raw_text
-        base_path = Path(base_name)
-        stem = base_path.stem or base_name or "invokeai"
-        sanitized_stem = re.sub(r"[^0-9A-Za-z._-]+", "_", stem).strip("._")
-        if not sanitized_stem:
-            sanitized_stem = hashlib.sha256(raw_text.encode("utf-8", "ignore")).hexdigest()[:16]
-
-        suffix_candidate = base_path.suffix
-        if suffix_candidate and re.fullmatch(r"\.[0-9A-Za-z]+", suffix_candidate):
-            suffix = suffix_candidate
-        else:
-            suffix = ".png"
-
-        image_path = self.images_dir / f"{sanitized_stem}{suffix}"
-        metadata_path = image_path.with_suffix(".json")
-        return image_path, metadata_path
+        return resolve_cached_paths(self.images_dir, image_name)
 
     def get_cached_image_result(self, image_name: str) -> Optional[Dict[str, Any]]:
         """Return cached image information if present on disk."""
@@ -2021,14 +2009,7 @@ class InvokeAIClient:
         }
 
     def _normalize_metadata_value(self, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: self._normalize_metadata_value(val) for key, val in value.items()}
-        if isinstance(value, list):
-            return [self._normalize_metadata_value(item) for item in value]
-        if isinstance(value, datetime.datetime):
-            dt = value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
-            return dt.isoformat()
-        return value
+        return normalize_metadata_value(value)
 
     def _store_image_result(
         self,
@@ -2081,8 +2062,7 @@ class InvokeAIClient:
             "session_id": session_id,
             "image": self._normalize_metadata_value(image_meta),
         }
-        with meta_path.open("w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
+        write_metadata_file(meta_path, metadata)
 
         return {
             "path": out_path,

@@ -1,0 +1,2 @@
+id,ip,port,scan_date,verified,verification_date,is_active,inactive_reason,last_check_date,api_type,hostnames,org,isp,city,region,country,latitude,longitude,ping,available_models
+Automatic1111 node 1,4.4.4.4,7860,2025-04-20T20:38:52.125129+00:00,1,2025-04-20T20:38:52.125129+00:00,TRUE,,2025-04-20T20:38:52.125129+00:00,automatic1111,,Creative ISP,Example ISP,ExampleCity,ExampleRegion,ExampleCountry,0,0,42.0,SDXL Base;SDXL Refiner

@@ -28,6 +28,12 @@ from invoke_client import (
     InvokeAIModel,
 )
 
+from automatic1111_client import (
+    Automatic1111Client,
+    Automatic1111ClientError,
+    Automatic1111Model,
+)
+
 try:
     import chafa
 except ImportError:  # pragma: no cover - optional dependency
@@ -94,6 +100,13 @@ TERMINALAI_BOARD_ID_ERROR_MESSAGE = (
 
 BATCH_STATUS_TIMEOUT = 120.0
 BATCH_STATUS_POLL_INTERVAL = 2.0
+
+
+AUTOMATIC1111_DEFAULT_WIDTH = 512
+AUTOMATIC1111_DEFAULT_HEIGHT = 512
+AUTOMATIC1111_DEFAULT_STEPS = 30
+AUTOMATIC1111_DEFAULT_CFG_SCALE = 7.0
+AUTOMATIC1111_DEFAULT_SAMPLER = "Euler a"
 
 
 def _normalize_board_id(board_id: Any) -> Optional[str]:
@@ -224,9 +237,11 @@ DATA_DIR = BASE_DIR / "data"
 LEGACY_CSV_PATH = DATA_DIR / "endpoints.csv"
 OLLAMA_CSV_PATH = DATA_DIR / "ollama.endpoints.csv"
 INVOKE_CSV_PATH = DATA_DIR / "invoke.endpoints.csv"
+AUTOMATIC1111_CSV_PATH = DATA_DIR / "automatic1111.endpoints.csv"
 CSV_PATHS = {
     "ollama": OLLAMA_CSV_PATH,
     "invokeai": INVOKE_CSV_PATH,
+    "automatic1111": AUTOMATIC1111_CSV_PATH,
 }
 BASE_COLUMNS = [
     "id",
@@ -252,6 +267,7 @@ BASE_COLUMNS = [
 COLUMN_ORDER = {
     "ollama": BASE_COLUMNS,
     "invokeai": BASE_COLUMNS + ["available_models"],
+    "automatic1111": BASE_COLUMNS + ["available_models"],
 }
 CONV_DIR = DATA_DIR / "conversations"
 LOG_DIR = DATA_DIR / "logs"
@@ -1771,6 +1787,146 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
             if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
                 break
             refresh_prompt_view = True
+
+
+def _run_automatic1111_flow(
+    client: Automatic1111Client, models: List[Automatic1111Model]
+) -> None:
+    if not models:
+        print(f"{RED}No Automatic1111 models reported by this server{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
+
+    try:
+        sampler_options = client.list_samplers()
+    except Automatic1111ClientError as exc:
+        print(f"{YELLOW}Failed to retrieve sampler list: {exc}{RESET}")
+        sampler_options = []
+    except requests.RequestException as exc:
+        print(f"{YELLOW}Failed to retrieve sampler list: {exc}{RESET}")
+        sampler_options = []
+
+    if not sampler_options:
+        sampler_options = [AUTOMATIC1111_DEFAULT_SAMPLER]
+
+    sampler_default = sampler_options[0]
+
+    while True:
+        model = select_automatic1111_model(models)
+        if model is None:
+            return
+
+        try:
+            client.set_active_model(model)
+        except Automatic1111ClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to choose another model{RESET}")
+            continue
+        except requests.RequestException as exc:
+            print(f"{RED}Failed to set active model: {exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to choose another model{RESET}")
+            continue
+
+        refresh_prompt_view = True
+        while True:
+            if refresh_prompt_view:
+                clear_screen()
+                _print_automatic1111_prompt_header(client, model)
+            refresh_prompt_view = True
+
+            prompt = get_input(f"{CYAN}Prompt: {RESET}")
+            if prompt == "ESC":
+                break
+            if not prompt.strip():
+                print(f"{RED}Prompt cannot be empty{RESET}")
+                refresh_prompt_view = False
+                continue
+
+            negative = get_input(f"{CYAN}Negative prompt (optional): {RESET}")
+            if negative == "ESC":
+                break
+
+            width = prompt_int(
+                "Width (px, multiple of 8)", AUTOMATIC1111_DEFAULT_WIDTH, minimum=64
+            )
+            if width is None:
+                break
+            height = prompt_int(
+                "Height (px, multiple of 8)", AUTOMATIC1111_DEFAULT_HEIGHT, minimum=64
+            )
+            if height is None:
+                break
+            steps = prompt_int("Steps", AUTOMATIC1111_DEFAULT_STEPS, minimum=1)
+            if steps is None:
+                break
+            cfg_scale = prompt_float(
+                "CFG Scale", AUTOMATIC1111_DEFAULT_CFG_SCALE, minimum=0.0
+            )
+            if cfg_scale is None:
+                break
+            sampler = select_sampler_option(sampler_options, sampler_default)
+            if sampler is None:
+                break
+            seed_text = get_input(f"{CYAN}Seed (blank=random): {RESET}")
+            if seed_text == "ESC":
+                break
+
+            seed_val = None
+            seed_text = seed_text.strip()
+            if seed_text:
+                try:
+                    seed_val = int(seed_text)
+                except ValueError:
+                    print(f"{RED}Seed must be an integer{RESET}")
+                    refresh_prompt_view = False
+                    continue
+
+            try:
+                result = _automatic1111_generate_image(
+                    client,
+                    model,
+                    prompt,
+                    negative,
+                    width,
+                    height,
+                    steps,
+                    cfg_scale,
+                    sampler,
+                    seed_val,
+                    REQUEST_TIMEOUT,
+                )
+            except Automatic1111ClientError as exc:
+                print(f"{RED}{exc}{RESET}")
+                get_input(f"{CYAN}Press Enter to try again{RESET}")
+                refresh_prompt_view = True
+                continue
+            except requests.RequestException as exc:
+                print(f"{RED}Network error: {exc}{RESET}")
+                get_input(f"{CYAN}Press Enter to try again{RESET}")
+                refresh_prompt_view = True
+                continue
+
+            metadata = result.get("metadata") if isinstance(result, dict) else {}
+            seed_used = metadata.get("seed") if isinstance(metadata, dict) else None
+            sampler_used = metadata.get("sampler") if isinstance(metadata, dict) else None
+
+            print(f"{GREEN}Image generated on {client.nickname}.{RESET}")
+            if seed_used is not None:
+                print(f"{CYAN}Seed used: {seed_used}{RESET}")
+            if sampler_used:
+                print(f"{CYAN}Sampler: {sampler_used}{RESET}")
+
+            _present_invoke_result(result, label="Image generated")
+
+            if sampler_used:
+                sampler_default = sampler_used
+
+            acknowledgement = get_input(
+                f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
+            )
+            if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
+                break
+            refresh_prompt_view = True
 def _invoke_generate_image(
     client: InvokeAIClient,
     model: "InvokeAIModel",
@@ -1807,6 +1963,45 @@ def _invoke_generate_image(
         seed=seed,
         board_name=TERMINALAI_BOARD_NAME,
         board_id=board_id,
+    )
+
+
+def _automatic1111_generate_image(
+    client: Automatic1111Client,
+    model: Automatic1111Model,
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    cfg_scale: float,
+    sampler: str,
+    seed: Optional[int],
+    timeout: float,
+):
+    prompt_text = (prompt or "").strip()
+    if not prompt_text:
+        raise Automatic1111ClientError("Prompt must not be empty")
+
+    negative_text = (negative_prompt or "").strip()
+    sampler_text = (sampler or "").strip()
+
+    width = max(64, (int(width) // 8) * 8)
+    height = max(64, (int(height) // 8) * 8)
+    steps = max(1, int(steps))
+    cfg_value = float(cfg_scale)
+
+    return client.txt2img(
+        model=model,
+        prompt=prompt_text,
+        negative_prompt=negative_text,
+        width=width,
+        height=height,
+        steps=steps,
+        cfg_scale=cfg_value,
+        sampler=sampler_text or None,
+        seed=seed,
+        timeout=timeout,
     )
 
 
@@ -1928,11 +2123,95 @@ def run_image_menu() -> None:
 
 
 def run_automatic1111_mode() -> None:
-    clear_screen()
-    print(
-        f"{YELLOW}Automatic1111 integration is not yet available in TerminalAI.{RESET}"
-    )
-    get_input(f"{CYAN}Press Enter to return to the menu{RESET}")
+    global selected_server, selected_api
+    selected_api = "automatic1111"
+
+    while True:
+        clear_screen()
+        servers = load_servers("automatic1111")
+        if not servers:
+            print(f"{RED}No Automatic1111 servers available{RESET}")
+            get_input(f"{CYAN}Press Enter to return to the main menu{RESET}")
+            return
+
+        server_choice = select_server(servers, allow_back=True)
+        if server_choice is None:
+            return
+        selected_server = server_choice
+        port = selected_server["apis"].get("automatic1111")
+        if port is None:
+            print(f"{RED}Selected server does not expose Automatic1111 API{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        client = Automatic1111Client(
+            selected_server["ip"], port, selected_server["nickname"], DATA_DIR
+        )
+
+        try:
+            models = client.list_models()
+        except Automatic1111ClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            try:
+                df = read_endpoints(selected_api)
+                mask = endpoint_mask(
+                    df,
+                    selected_server["ip"],
+                    selected_server["apis"].get(selected_api),
+                )
+                if mask.any():
+                    df.loc[mask, "is_active"] = False
+                    if "inactive_reason" in df.columns:
+                        df.loc[mask, "inactive_reason"] = "unsupported models endpoint"
+                    write_endpoints(selected_api, df)
+                    print(f"{YELLOW}Server marked inactive due to incompatible models API{RESET}")
+            except Exception as ex:
+                print(f"{RED}Failed to update CSV: {ex}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+        except requests.RequestException as exc:
+            print(f"{RED}Failed to retrieve models: {exc}{RESET}")
+            try:
+                df = read_endpoints(selected_api)
+                mask = endpoint_mask(
+                    df,
+                    selected_server["ip"],
+                    selected_server["apis"].get(selected_api),
+                )
+                if mask.any():
+                    df.loc[mask, "is_active"] = False
+                    if "inactive_reason" in df.columns:
+                        df.loc[mask, "inactive_reason"] = "api unreachable"
+                    write_endpoints(selected_api, df)
+                    print(f"{YELLOW}Server marked inactive due to network failure{RESET}")
+            except Exception as ex:
+                print(f"{RED}Failed to update CSV: {ex}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        if not models:
+            print(
+                f"{YELLOW}This server did not return any models. Image generation may be unavailable.{RESET}"
+            )
+            get_input(f"{CYAN}Press Enter to continue{RESET}")
+            clear_screen()
+
+        while True:
+            options = ["Generate Images", "Rename Server", "[Back]"]
+            header = f"Automatic1111 on {client.nickname}:"
+            choice = interactive_menu(header, options)
+            if choice is None or choice == len(options) - 1:
+                break
+            if choice == 0:
+                clear_screen()
+                _run_automatic1111_flow(client, models)
+                clear_screen()
+                continue
+            if choice == 1:
+                clear_screen()
+                _rename_current_server("automatic1111")
+                clear_screen()
+                continue
 
 
 def run_shodan_scan() -> None:
@@ -2152,12 +2431,26 @@ def check_invoke_api(ip, port):
         return False
 
 
+def check_automatic1111_api(ip, port):
+    """Verify an Automatic1111 server responds at the provided host and port."""
+
+    client = Automatic1111Client(ip, int(port), data_dir=DATA_DIR)
+    try:
+        return client.check_health()
+    except Automatic1111ClientError:
+        return False
+    except requests.RequestException:
+        return False
+
+
 def _probe_endpoint(api_type, ip, port, perform_api_check):
     latency = ping_time(ip, port)
     api_ok = None
     if latency is not None and perform_api_check:
         if api_type == "invokeai":
             api_ok = check_invoke_api(ip, port)
+        elif api_type == "automatic1111":
+            api_ok = check_automatic1111_api(ip, port)
         else:
             api_ok = check_ollama_api(ip, port)
     return latency, api_ok
@@ -2338,8 +2631,42 @@ def select_invoke_model(models):
             return models[choice]
 
 
-def select_scheduler_option(options: List[str], default_value: str) -> Optional[str]:
-    """Prompt for a scheduler using free text input."""
+def select_automatic1111_model(models: List[Automatic1111Model]) -> Optional[Automatic1111Model]:
+    labels: List[str] = []
+    for model in models:
+        pieces: List[str] = []
+        if isinstance(model.title, str) and model.title.strip():
+            pieces.append(model.title.strip())
+        if isinstance(model.name, str):
+            name_text = model.name.strip()
+            if name_text and name_text not in pieces:
+                pieces.append(name_text)
+        labels.append(" • ".join(pieces) if pieces else model.name or "Unnamed model")
+
+    if DEBUG_MODE:
+        print(f"{CYAN}Available Automatic1111 Models:{RESET}")
+        for idx, label in enumerate(labels, 1):
+            print(f"{GREEN}{idx}. {label}{RESET}")
+        print(f"{GREEN}0. [Back]{RESET}")
+        while True:
+            choice = get_input(f"{CYAN}Select model: {RESET}")
+            if choice in ("ESC", "0") or choice.lower() == "back":
+                return None
+            if choice.isdigit() and 1 <= int(choice) <= len(models):
+                return models[int(choice) - 1]
+            print(f"{RED}Invalid selection{RESET}")
+    else:
+        while True:
+            choice = interactive_menu("Automatic1111 Models:", labels)
+            if choice is None:
+                return None
+            return models[choice]
+
+
+def _select_freeform_option(
+    label: str, options: List[str], default_value: str
+) -> Optional[str]:
+    """Prompt for a free-form text option with optional suggestions."""
 
     cleaned: List[str] = []
     seen: set[str] = set()
@@ -2352,14 +2679,31 @@ def select_scheduler_option(options: List[str], default_value: str) -> Optional[
         seen.add(text.lower())
         cleaned.append(text)
 
+    if cleaned and DEBUG_MODE:
+        print(f"{CYAN}Available {label.lower()} options:{RESET}")
+        for idx, value in enumerate(cleaned, 1):
+            print(f"{GREEN}{idx}. {value}{RESET}")
+
     while True:
-        entry = get_input(f"{CYAN}Scheduler [{default_value}]: {RESET}")
+        entry = get_input(f"{CYAN}{label} [{default_value}]: {RESET}")
         if entry == "ESC":
             return None
         entry = entry.strip()
         if not entry:
             return default_value
         return entry
+
+
+def select_scheduler_option(options: List[str], default_value: str) -> Optional[str]:
+    """Prompt for a scheduler using free text input."""
+
+    return _select_freeform_option("Scheduler", options, default_value)
+
+
+def select_sampler_option(options: List[str], default_value: str) -> Optional[str]:
+    """Prompt for a sampler using free text input."""
+
+    return _select_freeform_option("Sampler", options, default_value)
 
 
 def fetch_models():
@@ -2459,6 +2803,23 @@ def _print_invoke_prompt_header(client: InvokeAIClient, model: InvokeAIModel) ->
     print(f"{BOLD}{GREEN}🖼️ InvokeAI Image Generator{RESET}")
     print(f"{GREEN}Server: {nickname} ({endpoint}){RESET}")
     print(f"{GREEN}Model: {model.name}{RESET}")
+    print(
+        f"{YELLOW}Enter prompt details below. Press Esc at any prompt to change the model or server.{RESET}"
+    )
+    print()
+
+
+def _print_automatic1111_prompt_header(
+    client: Automatic1111Client, model: Automatic1111Model
+) -> None:
+    """Render the Automatic1111 prompt header bar."""
+
+    nickname = getattr(client, "nickname", None) or client.ip
+    endpoint = f"{client.ip}:{client.port}" if getattr(client, "port", None) else client.ip
+    print(f"{BOLD}{GREEN}🖼️ Automatic1111 Image Generator{RESET}")
+    print(f"{GREEN}Server: {nickname} ({endpoint}){RESET}")
+    title = model.title if isinstance(model.title, str) and model.title.strip() else model.name
+    print(f"{GREEN}Model: {title}{RESET}")
     print(
         f"{YELLOW}Enter prompt details below. Press Esc at any prompt to change the model or server.{RESET}"
     )
