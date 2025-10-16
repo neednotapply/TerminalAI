@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from scripts.invoke_client import InvokeAIModel
+from scripts.invoke_client import FLUX_DEFAULT_SCHEDULER, InvokeAIModel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +90,74 @@ class TerminalAIInvokeTests(unittest.TestCase):
         )
         self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": None})
+
+    def test_invoke_generate_image_uses_flux_default_scheduler(self):
+        self.client.submit_image_generation.return_value = {"queue_item_id": "flux"}
+        flux_model = InvokeAIModel(name="flux", base="flux", key=None, raw={})
+
+        result = TerminalAI._invoke_generate_image(
+            self.client,
+            flux_model,
+            "Prompt",
+            None,
+            640,
+            640,
+            30,
+            7.5,
+            "   ",
+            None,
+            45,
+        )
+
+        self.client.submit_image_generation.assert_called_once_with(
+            model=flux_model,
+            prompt="Prompt",
+            negative_prompt="",
+            width=640,
+            height=640,
+            steps=30,
+            cfg_scale=7.5,
+            scheduler=FLUX_DEFAULT_SCHEDULER,
+            seed=None,
+            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_id="board-123",
+        )
+        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
+        self.assertEqual(result, {"queue_item_id": "flux"})
+
+    def test_invoke_generate_image_preserves_custom_flux_scheduler(self):
+        self.client.submit_image_generation.return_value = {"queue_item_id": "flux-custom"}
+        flux_model = InvokeAIModel(name="flux", base="flux", key=None, raw={})
+
+        result = TerminalAI._invoke_generate_image(
+            self.client,
+            flux_model,
+            "Prompt",
+            None,
+            640,
+            640,
+            30,
+            7.5,
+            "flux-vpred",
+            None,
+            45,
+        )
+
+        self.client.submit_image_generation.assert_called_once_with(
+            model=flux_model,
+            prompt="Prompt",
+            negative_prompt="",
+            width=640,
+            height=640,
+            steps=30,
+            cfg_scale=7.5,
+            scheduler="flux-vpred",
+            seed=None,
+            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_id="board-123",
+        )
+        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
+        self.assertEqual(result, {"queue_item_id": "flux-custom"})
 
     def test_invoke_generate_image_requires_prompt(self):
         with self.assertRaises(TerminalAI.InvokeAIClientError):
