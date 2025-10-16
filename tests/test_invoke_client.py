@@ -353,6 +353,43 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             edges,
         )
 
+    def test_build_flux_graph_includes_negative_node_without_prompt(self):
+        model = InvokeAIModel(
+            name="flux-schnell",
+            base="flux",
+            key=None,
+            raw={"base": "flux", "type": "main", "name": "FLUX.1 schnell"},
+        )
+
+        info = self.client._build_graph(
+            model=model,
+            prompt="cartoon rabbit",
+            negative_prompt="",
+            width=1280,
+            height=720,
+            steps=30,
+            cfg_scale=7.5,
+            scheduler="flux-default",
+            seed=1234,
+            board_id=None,
+            board_name=None,
+        )
+
+        nodes = info["graph"]["nodes"]
+        self.assertIn("negative_conditioning", nodes)
+        self.assertEqual(nodes["negative_conditioning"].get("prompt"), "")
+        edges = info["graph"]["edges"]
+        self.assertIn(
+            {
+                "source": {"node_id": "negative_conditioning", "field": "conditioning"},
+                "destination": {
+                    "node_id": "denoise",
+                    "field": "negative_text_conditioning",
+                },
+            },
+            edges,
+        )
+
     def test_build_enqueue_payload_includes_board_name_with_id(self):
         model = InvokeAIModel(
             name="test-sd",
