@@ -22,6 +22,7 @@ from invoke_client import (
     DEFAULT_SCHEDULER,
     DEFAULT_STEPS,
     DEFAULT_WIDTH,
+    FLUX_DEFAULT_SCHEDULER,
     UNCATEGORIZED_BOARD_ID,
     InvokeAIClient,
     InvokeAIClientError,
@@ -1979,7 +1980,14 @@ def _invoke_generate_image(
         raise InvokeAIClientError(TERMINALAI_BOARD_RESOLUTION_ERROR)
 
     negative_text = (negative_prompt or "").strip()
-    scheduler_name = (scheduler or "").strip() or DEFAULT_SCHEDULER
+    scheduler_name = (scheduler or "").strip()
+    model_base = getattr(model, "base", "") or ""
+    normalized_base = model_base.strip().lower()
+    if normalized_base.startswith("flux"):
+        if not scheduler_name or scheduler_name.strip().lower() == DEFAULT_SCHEDULER.lower():
+            scheduler_name = FLUX_DEFAULT_SCHEDULER
+    if not scheduler_name:
+        scheduler_name = DEFAULT_SCHEDULER
 
     return client.submit_image_generation(
         model=model,
