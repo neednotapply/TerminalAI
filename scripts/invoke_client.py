@@ -2745,6 +2745,12 @@ class InvokeAIClient:
                 "prompt": prompt,
                 "t5_max_seq_len": model_cfg.get("max_seq_len", 256),
             },
+            "negative_conditioning": {
+                "id": "negative_conditioning",
+                "type": "flux_text_encoder",
+                "prompt": negative_prompt or "",
+                "t5_max_seq_len": model_cfg.get("max_seq_len", 256),
+            },
             "denoise": {
                 "id": "denoise",
                 "type": "flux_denoise",
@@ -2802,10 +2808,29 @@ class InvokeAIClient:
                 "destination": {"node_id": "positive_conditioning", "field": "t5_max_seq_len"},
             },
             {
+                "source": {"node_id": "model_loader", "field": "clip"},
+                "destination": {"node_id": "negative_conditioning", "field": "clip"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "t5_encoder"},
+                "destination": {"node_id": "negative_conditioning", "field": "t5_encoder"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "max_seq_len"},
+                "destination": {"node_id": "negative_conditioning", "field": "t5_max_seq_len"},
+            },
+            {
                 "source": {"node_id": "positive_conditioning", "field": "conditioning"},
                 "destination": {
                     "node_id": "denoise",
                     "field": "positive_text_conditioning",
+                },
+            },
+            {
+                "source": {"node_id": "negative_conditioning", "field": "conditioning"},
+                "destination": {
+                    "node_id": "denoise",
+                    "field": "negative_text_conditioning",
                 },
             },
             {
@@ -2825,49 +2850,6 @@ class InvokeAIClient:
                 "destination": {"node_id": "save_image", "field": "image"},
             },
         ]
-
-        if negative_prompt:
-            nodes["negative_conditioning"] = {
-                "id": "negative_conditioning",
-                "type": "flux_text_encoder",
-                "prompt": negative_prompt,
-                "t5_max_seq_len": model_cfg.get("max_seq_len", 256),
-            }
-            edges.extend(
-                [
-                    {
-                        "source": {"node_id": "model_loader", "field": "clip"},
-                        "destination": {
-                            "node_id": "negative_conditioning",
-                            "field": "clip",
-                        },
-                    },
-                    {
-                        "source": {"node_id": "model_loader", "field": "t5_encoder"},
-                        "destination": {
-                            "node_id": "negative_conditioning",
-                            "field": "t5_encoder",
-                        },
-                    },
-                    {
-                        "source": {"node_id": "model_loader", "field": "max_seq_len"},
-                        "destination": {
-                            "node_id": "negative_conditioning",
-                            "field": "t5_max_seq_len",
-                        },
-                    },
-                    {
-                        "source": {
-                            "node_id": "negative_conditioning",
-                            "field": "conditioning",
-                        },
-                        "destination": {
-                            "node_id": "denoise",
-                            "field": "negative_text_conditioning",
-                        },
-                    },
-                ]
-            )
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
         return {"graph": graph, "data": None, "output": "save_image"}
