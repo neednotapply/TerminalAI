@@ -2208,7 +2208,28 @@ class InvokeAIClient:
                 board_name,
             )
         if normalized_base.startswith("flux"):
+            scheduler_name = scheduler or ""
+            if scheduler_name.strip().lower() == DEFAULT_SCHEDULER.lower() or not scheduler_name.strip():
+                scheduler_name = FLUX_DEFAULT_SCHEDULER
             return self._build_flux_graph(
+                model.raw,
+                prompt,
+                negative_prompt,
+                width,
+                height,
+                steps,
+                cfg_scale,
+                scheduler_name,
+                seed,
+                board_id,
+                board_name,
+            )
+        if (
+            normalized_base in {"sd3", "sd-3", "stable-diffusion-3"}
+            or normalized_base.startswith("sd3")
+            or normalized_base.startswith("stable-diffusion-3")
+        ):
+            return self._build_sd3_graph(
                 model.raw,
                 prompt,
                 negative_prompt,
@@ -2720,6 +2741,10 @@ class InvokeAIClient:
             for key in ("key", "hash", "name", "base", "type")
             if model_cfg.get(key) is not None
         }
+        scheduler_name = (scheduler or "").strip() or FLUX_DEFAULT_SCHEDULER
+        if scheduler_name.lower() == DEFAULT_SCHEDULER.lower():
+            scheduler_name = FLUX_DEFAULT_SCHEDULER
+
         metadata: Dict[str, Any] = {
             "prompt": prompt,
             "negative_prompt": negative_prompt or "",
@@ -2729,7 +2754,7 @@ class InvokeAIClient:
             "steps": steps,
             "cfg_scale": cfg_scale,
             "guidance": cfg_scale,
-            "scheduler": scheduler,
+            "scheduler": scheduler_name,
         }
         if model_identifiers:
             metadata["model"] = model_identifiers
@@ -2762,6 +2787,7 @@ class InvokeAIClient:
                 "denoising_start": 0.0,
                 "denoising_end": 1.0,
                 "seed": seed,
+                "scheduler": scheduler_name,
             },
             "vae_decode": {
                 "id": "vae_decode",
@@ -2854,6 +2880,164 @@ class InvokeAIClient:
 
         graph = {"id": graph_id, "nodes": nodes, "edges": edges}
         return {"graph": graph, "data": None, "output": "save_image"}
+
+
+    def _build_sd3_graph(
+        self,
+        model_cfg: Dict[str, Any],
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        scheduler: str,
+        seed: int,
+        board_id: Optional[str] = None,
+        board_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        graph_id = "terminal_sd3_graph"
+        model_identifiers = {
+            key: model_cfg.get(key)
+            for key in ("key", "hash", "name", "base", "type")
+            if model_cfg.get(key) is not None
+        }
+        metadata: Dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+        }
+        if scheduler:
+            metadata["scheduler"] = scheduler
+        if model_identifiers:
+            metadata["model"] = model_identifiers
+
+        model_loader: Dict[str, Any] = {
+            "id": "model_loader",
+            "type": "sd3_model_loader",
+            "model": model_cfg,
+        }
+
+        optional_submodels = (
+            ("t5_encoder_model", "t5_encoder_model"),
+            ("t5_encoder", "t5_encoder_model"),
+            ("clip_l_model", "clip_l_model"),
+            ("clip_l", "clip_l_model"),
+            ("clip_g_model", "clip_g_model"),
+            ("clip_g", "clip_g_model"),
+            ("vae_model", "vae_model"),
+            ("vae", "vae_model"),
+        )
+        for source_key, target_key in optional_submodels:
+            value = model_cfg.get(source_key)
+            if value is not None and target_key not in model_loader:
+                model_loader[target_key] = value
+
+        nodes: Dict[str, Dict[str, Any]] = {
+            "model_loader": model_loader,
+            "positive_conditioning": {
+                "id": "positive_conditioning",
+                "type": "sd3_text_encoder",
+                "prompt": prompt,
+            },
+            "negative_conditioning": {
+                "id": "negative_conditioning",
+                "type": "sd3_text_encoder",
+                "prompt": negative_prompt or "",
+            },
+            "denoise": {
+                "id": "denoise",
+                "type": "sd3_denoise",
+                "cfg_scale": cfg_scale,
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "seed": seed,
+                "denoising_start": 0.0,
+                "denoising_end": 1.0,
+                "metadata": metadata,
+            },
+            "latents_to_image": {
+                "id": "latents_to_image",
+                "type": "sd3_l2i",
+                "metadata": metadata,
+            },
+        }
+
+        board_reference: Optional[Dict[str, Any]] = None
+        normalized_board_id = self._normalize_board_id(board_id)
+        normalized_board_name = self._normalize_board_name(board_name)
+        if normalized_board_id:
+            board_reference = {"board_id": normalized_board_id}
+            if normalized_board_name:
+                board_reference["board_name"] = normalized_board_name
+        else:
+            if normalized_board_name:
+                fallback_id, _ = self._resolve_board_reference(
+                    normalized_board_name, create=False
+                )
+                fallback_board_id = self._normalize_board_id(fallback_id)
+                if fallback_board_id:
+                    board_reference = {"board_id": fallback_board_id}
+                    board_reference["board_name"] = normalized_board_name
+
+        if board_reference:
+            nodes["denoise"]["board"] = board_reference
+            nodes["latents_to_image"]["board"] = board_reference
+
+        edges: List[Dict[str, Dict[str, str]]] = [
+            {
+                "source": {"node_id": "model_loader", "field": "clip_l"},
+                "destination": {"node_id": "positive_conditioning", "field": "clip_l"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "clip_l"},
+                "destination": {"node_id": "negative_conditioning", "field": "clip_l"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "clip_g"},
+                "destination": {"node_id": "positive_conditioning", "field": "clip_g"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "clip_g"},
+                "destination": {"node_id": "negative_conditioning", "field": "clip_g"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "t5_encoder"},
+                "destination": {"node_id": "positive_conditioning", "field": "t5_encoder"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "t5_encoder"},
+                "destination": {"node_id": "negative_conditioning", "field": "t5_encoder"},
+            },
+            {
+                "source": {"node_id": "positive_conditioning", "field": "conditioning"},
+                "destination": {"node_id": "denoise", "field": "positive_conditioning"},
+            },
+            {
+                "source": {"node_id": "negative_conditioning", "field": "conditioning"},
+                "destination": {"node_id": "denoise", "field": "negative_conditioning"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "transformer"},
+                "destination": {"node_id": "denoise", "field": "transformer"},
+            },
+            {
+                "source": {"node_id": "denoise", "field": "latents"},
+                "destination": {"node_id": "latents_to_image", "field": "latents"},
+            },
+            {
+                "source": {"node_id": "model_loader", "field": "vae"},
+                "destination": {"node_id": "latents_to_image", "field": "vae"},
+            },
+        ]
+
+        graph = {"id": graph_id, "nodes": nodes, "edges": edges}
+        return {"graph": graph, "data": None, "output": "latents_to_image"}
 
 
 __all__ = ["InvokeAIClient", "InvokeAIClientError", "InvokeAIModel"]
