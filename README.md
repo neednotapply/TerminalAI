@@ -32,12 +32,9 @@ Use the launcher for a graphical menu with matrix rain effects.
 - **Linux/macOS**: `./launcher.sh`
 - **Windows**: `launcher.bat`
 
-The launcher offers two actions:
+The launcher now groups actions by API. Pick **LLM Chat** or **Image Generation**, then choose a provider-specific task such as launching TerminalAI or running a Shodan scan scoped to that API. Endpoint refreshes still update the corresponding CSV files under `data/`.
 
-1. **Start TerminalAI** – chat with a selected Ollama server or generate images from InvokeAI hosts.
-2. **Scan Shodan** – refresh `data/ollama.endpoints.csv` and `data/invoke.endpoints.csv` with public instances.
-
-Press `1` or `2` to choose an action. The launcher restores the console on exit.
+Press the highlighted number to choose an option. The launcher restores the console on exit.
 
 ### Chat Client
 
