@@ -13,7 +13,7 @@ import socket
 import subprocess
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
 from pathlib import Path
 from rain import rain
 from invoke_client import (
@@ -807,10 +807,71 @@ def interactive_menu(header, options, center=False):
     return _matrix_menu(header, menu_options, center=center)
 
 
+class _MatrixMenuLayout(NamedTuple):
+    visible_count: int
+    instruction_text: str
+    box_x: int
+    box_y: int
+    box_width: int
+    box_height: int
+
+
+def _calculate_matrix_layout(
+    header_lines: List[str],
+    options: List[tuple[str, Optional[str]]],
+    center: bool,
+    cols: int,
+    rows: int,
+) -> _MatrixMenuLayout:
+    header_height = len(header_lines)
+    blank_after_header = 1 if header_height else 0
+    blank_before_instructions = 1
+    instructions_lines = 1
+
+    base_height = 2 + header_height + blank_after_header + blank_before_instructions + instructions_lines
+    visible_count = min(len(options), max(1, rows - base_height))
+
+    instruction_text = "↑/↓ Move  Enter Select  Esc Back"
+    if len(options) > visible_count:
+        instruction_text += "  PgUp/PgDn Scroll"
+
+    max_header_width = max((len(line) for line in header_lines), default=0)
+    max_option_width = max((len(label) for label, _ in options), default=0) + 4
+    desired_content_width = max(max_header_width, max_option_width, len(instruction_text))
+    max_allowed_width = max(4, cols - 2)
+    desired_width = max(30, desired_content_width + 4)
+    box_width = min(cols, max(6, min(max_allowed_width, desired_width)))
+
+    box_height = min(rows, base_height + visible_count)
+    box_x = max(1, (cols - box_width) // 2 + 1)
+    box_y = max(1, (rows - box_height) // 2 + 1)
+
+    return _MatrixMenuLayout(
+        visible_count=visible_count,
+        instruction_text=instruction_text,
+        box_x=box_x,
+        box_y=box_y,
+        box_width=box_width,
+        box_height=box_height,
+    )
+
+
 def _matrix_menu(
     header: str, options: List[tuple[str, Optional[str]]], *, center: bool
 ) -> Optional[int]:
-    boxes: List[Dict[str, int]] = []
+    header_lines = header.splitlines() if header else []
+    cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+    layout = _calculate_matrix_layout(header_lines, options, center, cols, rows)
+
+    boxes: List[Dict[str, int]] = [
+        {
+            "top": layout.box_y,
+            "bottom": layout.box_y + layout.box_height - 1,
+            "left": layout.box_x,
+            "right": layout.box_x + layout.box_width - 1,
+        }
+    ]
+
     stop_event = threading.Event()
     thread = threading.Thread(
         target=rain,
@@ -818,32 +879,28 @@ def _matrix_menu(
             "persistent": True,
             "stop_event": stop_event,
             "boxes": boxes,
-            "clear_screen": True,
+            "clear_screen": False,
         },
         daemon=True,
     )
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
     thread.start()
 
     try:
-        return _matrix_menu_loop(header, options, boxes, center=center)
+        return _matrix_menu_loop(header_lines, options, boxes, center=center)
     finally:
         stop_event.set()
         thread.join()
 
 
 def _matrix_menu_loop(
-    header: str,
+    header_lines: List[str],
     options: List[tuple[str, Optional[str]]],
     boxes: List[Dict[str, int]],
     *,
     center: bool,
 ) -> Optional[int]:
-    header_lines = header.splitlines() if header else []
-    header_height = len(header_lines)
-    blank_after_header = 1 if header_height else 0
-    blank_before_instructions = 1
-    instructions_lines = 1
-
     selected = 0
     offset = 0
 
@@ -857,31 +914,16 @@ def _matrix_menu_loop(
     try:
         while True:
             cols, rows = shutil.get_terminal_size(fallback=(80, 24))
-            base_height = (
-                2 + header_height + blank_after_header + blank_before_instructions + instructions_lines
-            )
-            visible_count = min(len(options), max(1, rows - base_height))
             if not options:
                 return None
 
-            instruction_text = "↑/↓ Move  Enter Select  Esc Back"
-            if len(options) > visible_count:
-                instruction_text += "  PgUp/PgDn Scroll"
-
-            max_header_width = max((len(line) for line in header_lines), default=0)
-            max_option_width = max((len(label) for label, _ in options), default=0) + 4
-            desired_content_width = max(max_header_width, max_option_width, len(instruction_text))
-            max_allowed_width = max(4, cols - 2)
-            desired_width = max(30, desired_content_width + 4)
-            box_width = min(cols, max(6, min(max_allowed_width, desired_width)))
-            inner_width = max(2, box_width - 2)
-            content_width = (
-                max(1, inner_width - 2) if inner_width > 2 else inner_width
-            )
-
-            box_height = min(rows, base_height + visible_count)
-            box_x = max(1, (cols - box_width) // 2 + 1)
-            box_y = max(1, (rows - box_height) // 2 + 1)
+            layout = _calculate_matrix_layout(header_lines, options, center, cols, rows)
+            visible_count = layout.visible_count
+            instruction_text = layout.instruction_text
+            box_width = layout.box_width
+            box_height = layout.box_height
+            box_x = layout.box_x
+            box_y = layout.box_y
 
             max_offset = max(0, len(options) - visible_count)
             if offset > max_offset:
@@ -966,18 +1008,18 @@ def _render_matrix_menu(
     box_height: int,
     center: bool,
 ) -> None:
+    buffer: List[str] = []
     top_border = f"{GREEN}┌{'─' * (box_width - 2)}┐{RESET}" if box_width >= 2 else ""
     bottom_border = f"{GREEN}└{'─' * (box_width - 2)}┘{RESET}" if box_width >= 2 else ""
     if top_border:
-        print(f"\033[{box_y};{box_x}H{top_border}", end="")
+        buffer.append(f"\033[{box_y};{box_x}H{top_border}")
     inner_width = max(0, box_width - 2)
     for row in range(1, box_height - 1):
-        print(
-            f"\033[{box_y + row};{box_x}H{GREEN}│{RESET}{' ' * inner_width}{GREEN}│{RESET}",
-            end="",
+        buffer.append(
+            f"\033[{box_y + row};{box_x}H{GREEN}│{RESET}{' ' * inner_width}{GREEN}│{RESET}"
         )
     if bottom_border:
-        print(f"\033[{box_y + box_height - 1};{box_x}H{bottom_border}", end="")
+        buffer.append(f"\033[{box_y + box_height - 1};{box_x}H{bottom_border}")
 
     inner_left = box_x + 1
     inner_width = max(1, box_width - 2)
@@ -987,16 +1029,16 @@ def _render_matrix_menu(
 
     if header_lines:
         for line in header_lines:
-            print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+            buffer.append(f"\033[{line_y};{inner_left}H{' ' * inner_width}")
             truncated = line[: content_width if not center else inner_width]
             if center:
                 start_x = inner_left + max((inner_width - len(truncated)) // 2, 0)
             else:
                 start_x = content_left
                 truncated = truncated[:content_width]
-            print(f"\033[{line_y};{start_x}H{BOLD}{GREEN}{truncated}{RESET}", end="")
+            buffer.append(f"\033[{line_y};{start_x}H{BOLD}{GREEN}{truncated}{RESET}")
             line_y += 1
-        print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+        buffer.append(f"\033[{line_y};{inner_left}H{' ' * inner_width}")
         line_y += 1
 
     options_start_line = line_y
@@ -1012,28 +1054,23 @@ def _render_matrix_menu(
         marker = "▶" if actual == selected else " "
         option_text = f"{marker} {label}" if content_width > 2 else label
         option_text = option_text[:content_width]
-        print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+        buffer.append(f"\033[{line_y};{inner_left}H{' ' * inner_width}")
         color = CYAN if actual == selected else color_map.get(style, GREEN)
         emphasis = BOLD if actual == selected else ""
-        print(
-            f"\033[{line_y};{content_left}H{emphasis}{color}{option_text}{RESET}",
-            end="",
+        buffer.append(
+            f"\033[{line_y};{content_left}H{emphasis}{color}{option_text}{RESET}"
         )
         line_y += 1
 
     scroll_column = box_x + box_width - 2
     if offset > 0 and scroll_column >= box_x:
-        print(
-            f"\033[{options_start_line};{scroll_column}H{CYAN}▲{RESET}",
-            end="",
-        )
+        buffer.append(f"\033[{options_start_line};{scroll_column}H{CYAN}▲{RESET}")
     if offset + visible_count < len(options) and scroll_column >= box_x:
-        print(
-            f"\033[{options_start_line + visible_count - 1};{scroll_column}H{CYAN}▼{RESET}",
-            end="",
+        buffer.append(
+            f"\033[{options_start_line + visible_count - 1};{scroll_column}H{CYAN}▼{RESET}"
         )
 
-    print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+    buffer.append(f"\033[{line_y};{inner_left}H{' ' * inner_width}")
     line_y += 1
 
     if center:
@@ -1042,9 +1079,10 @@ def _render_matrix_menu(
     else:
         instruction_line = instruction_text[: content_width]
         start_x = content_left
-    print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
-    print(f"\033[{line_y};{start_x}H{CYAN}{instruction_line}{RESET}", end="")
+    buffer.append(f"\033[{line_y};{inner_left}H{' ' * inner_width}")
+    buffer.append(f"\033[{line_y};{start_x}H{CYAN}{instruction_line}{RESET}")
 
+    sys.stdout.write("".join(buffer))
     sys.stdout.flush()
 
 
