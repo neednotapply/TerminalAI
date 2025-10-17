@@ -764,6 +764,11 @@ def main():
         default=25,
         help="Maximum existing endpoints to verify per run",
     )
+    parser.add_argument(
+        "--api-type",
+        choices=sorted(CSV_PATHS.keys()),
+        help="Limit the scan to a single API type",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -781,7 +786,16 @@ def main():
     for info in SHODAN_QUERIES:
         queries_by_type.setdefault(info["api_type"], []).append(info)
 
-    for api_type, query_infos in queries_by_type.items():
+    if args.api_type:
+        target_types = [args.api_type]
+    else:
+        target_types = list(queries_by_type.keys())
+
+    for api_type in target_types:
+        query_infos = queries_by_type.get(api_type, [])
+        if not query_infos:
+            logging.info("No queries configured for %s endpoints", api_type)
+            continue
         logging.info("Processing %s endpoints", api_type)
         df = load_dataframe(api_type)
         if not df.empty and "last_check_date" in df.columns:

@@ -1,3 +1,4 @@
+import sys
 import pandas as pd
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -79,3 +80,36 @@ def test_find_new_automatic1111_persists_models(tmp_path, monkeypatch):
     contents = output_path.read_text(encoding="utf-8")
     assert "automatic1111" in contents
     assert "SDXL Base;SDXL Refiner" in contents
+
+
+def test_main_limits_to_selected_api(monkeypatch):
+    recorded = []
+
+    monkeypatch.setattr(shodanscan, "load_api_key", lambda: "token")
+
+    class DummyShodan:
+        def __init__(self, key):
+            recorded.append(("shodan", key))
+
+    monkeypatch.setattr(shodanscan.shodan, "Shodan", DummyShodan)
+
+    def fake_load_dataframe(api_type):
+        recorded.append(("load", api_type))
+        return shodanscan.ensure_columns(pd.DataFrame(columns=[]), api_type)
+
+    monkeypatch.setattr(shodanscan, "load_dataframe", fake_load_dataframe)
+
+    def fake_find_new(api, df, info, limit):
+        recorded.append(("find", info["api_type"]))
+        return df
+
+    monkeypatch.setattr(shodanscan, "find_new", fake_find_new)
+    monkeypatch.setattr(shodanscan, "save_dataframe", lambda api, df: recorded.append(("save", api)))
+
+    monkeypatch.setattr(sys, "argv", ["shodanscan.py", "--api-type", "invokeai"])
+
+    shodanscan.main()
+
+    targeted = [entry for entry in recorded if entry[0] in {"load", "find", "save"}]
+    assert targeted
+    assert all(api == "invokeai" for _kind, api in targeted)

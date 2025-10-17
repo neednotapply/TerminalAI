@@ -24,6 +24,7 @@ sys.modules.setdefault("invoke_client", importlib.import_module("scripts.invoke_
 import scripts.TerminalAI
 from scripts.invoke_client import (
     DEFAULT_SCHEDULER,
+    FLUX_DEFAULT_SCHEDULER,
     InvokeAIClient,
     InvokeAIModel,
     InvokeAIClientError,
@@ -378,6 +379,33 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         nodes = info["graph"]["nodes"]
         self.assertIn("negative_conditioning", nodes)
         self.assertEqual(nodes["negative_conditioning"].get("prompt"), "")
+
+    def test_build_flux_graph_normalizes_scheduler(self):
+        model = InvokeAIModel(
+            name="flux-dev",
+            base="flux",
+            key=None,
+            raw={"base": "flux", "type": "main", "name": "Flux.1 dev"},
+        )
+
+        info = self.client._build_graph(
+            model=model,
+            prompt="ocean at dusk",
+            negative_prompt="",
+            width=960,
+            height=640,
+            steps=20,
+            cfg_scale=4.0,
+            scheduler="euler",
+            seed=999,
+            board_id=None,
+            board_name=None,
+        )
+
+        nodes = info["graph"]["nodes"]
+        metadata = nodes["save_image"]["metadata"]
+        self.assertEqual(metadata.get("scheduler"), FLUX_DEFAULT_SCHEDULER)
+        self.assertEqual(nodes["denoise"].get("scheduler"), FLUX_DEFAULT_SCHEDULER)
         edges = info["graph"]["edges"]
         self.assertIn(
             {
@@ -389,6 +417,101 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             },
             edges,
         )
+
+    def test_build_sd3_graph_structure(self):
+        model = InvokeAIModel(
+            name="sd3-medium",
+            base="sd3",
+            key="sd3-medium",
+            raw={
+                "key": "sd3-medium",
+                "hash": "hash",
+                "name": "SD3.5 Medium",
+                "base": "sd3",
+                "type": "main",
+            },
+        )
+
+        info = self.client._build_graph(
+            model=model,
+            prompt="cyberpunk forest",
+            negative_prompt="low detail",
+            width=1024,
+            height=896,
+            steps=28,
+            cfg_scale=3.5,
+            scheduler="flowmatch",
+            seed=5150,
+        )
+
+        graph = info["graph"]
+        nodes = graph["nodes"]
+        self.assertEqual(nodes["model_loader"].get("type"), "sd3_model_loader")
+        self.assertEqual(nodes["denoise"].get("type"), "sd3_denoise")
+        self.assertEqual(nodes["latents_to_image"].get("type"), "sd3_l2i")
+        self.assertEqual(nodes["positive_conditioning"].get("type"), "sd3_text_encoder")
+        self.assertEqual(nodes["negative_conditioning"].get("prompt"), "low detail")
+
+        metadata = nodes["latents_to_image"].get("metadata")
+        self.assertIsInstance(metadata, dict)
+        self.assertEqual(metadata.get("prompt"), "cyberpunk forest")
+        self.assertEqual(metadata.get("negative_prompt"), "low detail")
+        self.assertEqual(metadata.get("seed"), 5150)
+        self.assertEqual(metadata.get("width"), 1024)
+        self.assertEqual(metadata.get("height"), 896)
+        self.assertEqual(metadata.get("steps"), 28)
+        self.assertEqual(metadata.get("cfg_scale"), 3.5)
+        self.assertEqual(metadata.get("scheduler"), "flowmatch")
+
+        edges = graph["edges"]
+        self.assertIn(
+            {
+                "source": {"node_id": "model_loader", "field": "transformer"},
+                "destination": {"node_id": "denoise", "field": "transformer"},
+            },
+            edges,
+        )
+        self.assertIn(
+            {
+                "source": {"node_id": "denoise", "field": "latents"},
+                "destination": {"node_id": "latents_to_image", "field": "latents"},
+            },
+            edges,
+        )
+        self.assertEqual(info["output"], "latents_to_image")
+
+    def test_build_sd3_graph_attaches_board(self):
+        model = InvokeAIModel(
+            name="sd3-large",
+            base="sd3",
+            key="sd3-large",
+            raw={
+                "key": "sd3-large",
+                "hash": "hash",
+                "name": "SD3.5 Large",
+                "base": "sd3",
+                "type": "main",
+            },
+        )
+
+        info = self.client._build_graph(
+            model=model,
+            prompt="mystic portrait",
+            negative_prompt="",
+            width=896,
+            height=1152,
+            steps=30,
+            cfg_scale=4.0,
+            scheduler="flowmatch",
+            seed=4242,
+            board_id="board-sd3",
+            board_name="TerminalAI",
+        )
+
+        nodes = info["graph"]["nodes"]
+        board_ref = {"board_id": "board-sd3", "board_name": "TerminalAI"}
+        self.assertEqual(nodes["denoise"].get("board"), board_ref)
+        self.assertEqual(nodes["latents_to_image"].get("board"), board_ref)
 
     def test_build_enqueue_payload_includes_board_name_with_id(self):
         model = InvokeAIModel(

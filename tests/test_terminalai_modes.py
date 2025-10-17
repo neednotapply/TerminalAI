@@ -43,3 +43,26 @@ def test_dispatch_mode_returns_false_for_unknown_mode():
 
     assert result is False
     mock_print.assert_called()
+
+
+def test_run_shodan_scan_injects_api_type(monkeypatch):
+    commands = []
+
+    monkeypatch.setattr(TerminalAI, "clear_screen", lambda force=False: None)
+    monkeypatch.setattr(TerminalAI, "DEBUG_MODE", True, raising=False)
+    monkeypatch.setattr(TerminalAI.sys, "argv", ["TerminalAI.py", "--foo"])
+
+    def fake_call(cmd):
+        commands.append(cmd)
+        return 0
+
+    monkeypatch.setattr(TerminalAI.subprocess, "call", fake_call)
+
+    TerminalAI.run_shodan_scan("invokeai")
+
+    assert commands
+    cmd = commands[0]
+    assert "--api-type" in cmd
+    api_index = cmd.index("--api-type")
+    assert api_index + 1 < len(cmd)
+    assert cmd[api_index + 1] == "invokeai"

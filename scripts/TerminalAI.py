@@ -741,8 +741,26 @@ def get_key():
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def interactive_menu(header, options):
-    menu_options = []
+_MATRIX_ESCAPE_MAP = {
+    "[A": "UP",
+    "OA": "UP",
+    "[B": "DOWN",
+    "OB": "DOWN",
+    "[5~": "PAGE_UP",
+    "[6~": "PAGE_DOWN",
+    "[H": "HOME",
+    "OH": "HOME",
+    "[F": "END",
+    "OF": "END",
+    "[1~": "HOME",
+    "[4~": "END",
+    "[7~": "HOME",
+    "[8~": "END",
+}
+
+
+def interactive_menu(header, options, center=False):
+    menu_options: List[tuple[str, Optional[str]]] = []
     for opt in options:
         if isinstance(opt, dict):
             label = str(opt.get("label", ""))
@@ -757,55 +775,349 @@ def interactive_menu(header, options):
         else:
             label = str(opt)
             style = None
-        menu_options.append({"label": label, "style": style})
+        menu_options.append((label, style))
 
     if not menu_options:
         return None
 
+    if DEBUG_MODE:
+        print(f"{CYAN}{header}{RESET}")
+        for idx, (label, _style) in enumerate(menu_options, 1):
+            print(f"{GREEN}{idx}. {label}{RESET}")
+        while True:
+            choice = get_input(f"{CYAN}Choose an option: {RESET}")
+            if choice == "ESC":
+                return None
+            if choice.isdigit():
+                index = int(choice) - 1
+                if 0 <= index < len(menu_options):
+                    return index
+            print(f"{RED}Invalid selection{RESET}")
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print(f"{CYAN}{header}{RESET}")
+        for idx, (label, _style) in enumerate(menu_options, 1):
+            print(f"{GREEN}{idx}. {label}{RESET}")
+        try:
+            resp = input("Select option #: ").strip()
+        except EOFError:
+            return None
+        return int(resp) - 1 if resp.isdigit() else None
+
+    return _matrix_menu(header, menu_options, center=center)
+
+
+def _matrix_menu(
+    header: str, options: List[tuple[str, Optional[str]]], *, center: bool
+) -> Optional[int]:
+    boxes: List[Dict[str, int]] = []
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=rain,
+        kwargs={
+            "persistent": True,
+            "stop_event": stop_event,
+            "boxes": boxes,
+            "clear_screen": True,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    try:
+        return _matrix_menu_loop(header, options, boxes, center=center)
+    finally:
+        stop_event.set()
+        thread.join()
+
+
+def _matrix_menu_loop(
+    header: str,
+    options: List[tuple[str, Optional[str]]],
+    boxes: List[Dict[str, int]],
+    *,
+    center: bool,
+) -> Optional[int]:
+    header_lines = header.splitlines() if header else []
+    header_height = len(header_lines)
+    blank_after_header = 1 if header_height else 0
+    blank_before_instructions = 1
+    instructions_lines = 1
+
+    selected = 0
+    offset = 0
+
+    fd = None
+    old_settings = None
+    if os.name != "nt":
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+
+    try:
+        while True:
+            cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+            base_height = (
+                2 + header_height + blank_after_header + blank_before_instructions + instructions_lines
+            )
+            visible_count = min(len(options), max(1, rows - base_height))
+            if not options:
+                return None
+
+            instruction_text = "↑/↓ Move  Enter Select  Esc Back"
+            if len(options) > visible_count:
+                instruction_text += "  PgUp/PgDn Scroll"
+
+            max_header_width = max((len(line) for line in header_lines), default=0)
+            max_option_width = max((len(label) for label, _ in options), default=0) + 4
+            desired_content_width = max(max_header_width, max_option_width, len(instruction_text))
+            max_allowed_width = max(4, cols - 2)
+            desired_width = max(30, desired_content_width + 4)
+            box_width = min(cols, max(6, min(max_allowed_width, desired_width)))
+            inner_width = max(2, box_width - 2)
+            content_width = (
+                max(1, inner_width - 2) if inner_width > 2 else inner_width
+            )
+
+            box_height = min(rows, base_height + visible_count)
+            box_x = max(1, (cols - box_width) // 2 + 1)
+            box_y = max(1, (rows - box_height) // 2 + 1)
+
+            max_offset = max(0, len(options) - visible_count)
+            if offset > max_offset:
+                offset = max_offset
+            if selected >= len(options):
+                selected = max(0, len(options) - 1)
+            if selected < offset:
+                offset = selected
+            elif selected >= offset + visible_count:
+                offset = max(0, selected - visible_count + 1)
+
+            if boxes:
+                boxes[0].update(
+                    {
+                        "top": box_y,
+                        "bottom": box_y + box_height - 1,
+                        "left": box_x,
+                        "right": box_x + box_width - 1,
+                    }
+                )
+            else:
+                boxes.append(
+                    {
+                        "top": box_y,
+                        "bottom": box_y + box_height - 1,
+                        "left": box_x,
+                        "right": box_x + box_width - 1,
+                    }
+                )
+
+            _render_matrix_menu(
+                header_lines,
+                options,
+                offset,
+                visible_count,
+                selected,
+                instruction_text,
+                box_x,
+                box_y,
+                box_width,
+                box_height,
+                center,
+            )
+
+            action = _read_matrix_action(fd)
+            if action == "UP":
+                selected = (selected - 1) % len(options)
+            elif action == "DOWN":
+                selected = (selected + 1) % len(options)
+            elif action == "PAGE_UP":
+                selected = max(0, selected - visible_count)
+            elif action == "PAGE_DOWN":
+                selected = min(len(options) - 1, selected + visible_count)
+            elif action == "HOME":
+                selected = 0
+            elif action == "END":
+                selected = len(options) - 1
+            elif action == "ENTER":
+                return selected
+            elif action == "ESC":
+                return None
+
+            if selected < offset:
+                offset = selected
+            elif selected >= offset + visible_count:
+                offset = max(0, selected - visible_count + 1)
+    finally:
+        if os.name != "nt" and old_settings is not None and fd is not None:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _render_matrix_menu(
+    header_lines: List[str],
+    options: List[tuple[str, Optional[str]]],
+    offset: int,
+    visible_count: int,
+    selected: int,
+    instruction_text: str,
+    box_x: int,
+    box_y: int,
+    box_width: int,
+    box_height: int,
+    center: bool,
+) -> None:
+    top_border = f"{GREEN}┌{'─' * (box_width - 2)}┐{RESET}" if box_width >= 2 else ""
+    bottom_border = f"{GREEN}└{'─' * (box_width - 2)}┘{RESET}" if box_width >= 2 else ""
+    if top_border:
+        print(f"\033[{box_y};{box_x}H{top_border}", end="")
+    inner_width = max(0, box_width - 2)
+    for row in range(1, box_height - 1):
+        print(
+            f"\033[{box_y + row};{box_x}H{GREEN}│{RESET}{' ' * inner_width}{GREEN}│{RESET}",
+            end="",
+        )
+    if bottom_border:
+        print(f"\033[{box_y + box_height - 1};{box_x}H{bottom_border}", end="")
+
+    inner_left = box_x + 1
+    inner_width = max(1, box_width - 2)
+    content_left = inner_left + 1 if inner_width > 2 else inner_left
+    content_width = max(1, inner_width - 2) if inner_width > 2 else inner_width
+    line_y = box_y + 1
+
+    if header_lines:
+        for line in header_lines:
+            print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+            truncated = line[: content_width if not center else inner_width]
+            if center:
+                start_x = inner_left + max((inner_width - len(truncated)) // 2, 0)
+            else:
+                start_x = content_left
+                truncated = truncated[:content_width]
+            print(f"\033[{line_y};{start_x}H{BOLD}{GREEN}{truncated}{RESET}", end="")
+            line_y += 1
+        print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+        line_y += 1
+
+    options_start_line = line_y
+    visible_options = options[offset : offset + visible_count]
     color_map = {
         None: GREEN,
         "default": GREEN,
         "warning": WARNING,
         "danger": RED,
     }
+    for index, (label, style) in enumerate(visible_options):
+        actual = offset + index
+        marker = "▶" if actual == selected else " "
+        option_text = f"{marker} {label}" if content_width > 2 else label
+        option_text = option_text[:content_width]
+        print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+        color = CYAN if actual == selected else color_map.get(style, GREEN)
+        emphasis = BOLD if actual == selected else ""
+        print(
+            f"\033[{line_y};{content_left}H{emphasis}{color}{option_text}{RESET}",
+            end="",
+        )
+        line_y += 1
 
-    idx = 0
-    offset = 0
-    count = len(menu_options)
+    scroll_column = box_x + box_width - 2
+    if offset > 0 and scroll_column >= box_x:
+        print(
+            f"\033[{options_start_line};{scroll_column}H{CYAN}▲{RESET}",
+            end="",
+        )
+    if offset + visible_count < len(options) and scroll_column >= box_x:
+        print(
+            f"\033[{options_start_line + visible_count - 1};{scroll_column}H{CYAN}▼{RESET}",
+            end="",
+        )
 
-    while True:
-        clear_screen()
-        print(f"{GREEN}{header}{RESET}")
-        rows = shutil.get_terminal_size(fallback=(80, 24)).lines
-        view_height = max(1, rows - 2)
-        end = offset + view_height
-        visible = menu_options[offset:end]
-        for i, opt in enumerate(visible):
-            actual = offset + i
-            prefix = "> " if actual == idx else "  "
-            style = opt.get("style")
-            color = color_map.get(style, GREEN)
-            bold = BOLD if actual == idx else ""
-            print(f"{bold}{color}{prefix}{opt['label']}{RESET}")
-        key = get_key()
-        if key == "UP":
-            idx = (idx - 1) % count
-        elif key == "DOWN":
-            idx = (idx + 1) % count
-        elif key in ("ENTER", "SPACE"):
-            return idx
-        elif key == "ESC":
-            return None
-        if idx < offset:
-            offset = idx
-        elif idx >= offset + view_height:
-            offset = idx - view_height + 1
+    print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+    line_y += 1
+
+    if center:
+        instruction_line = instruction_text[: inner_width]
+        start_x = inner_left + max((inner_width - len(instruction_line)) // 2, 0)
+    else:
+        instruction_line = instruction_text[: content_width]
+        start_x = content_left
+    print(f"\033[{line_y};{inner_left}H{' ' * inner_width}", end="")
+    print(f"\033[{line_y};{start_x}H{CYAN}{instruction_line}{RESET}", end="")
+
+    sys.stdout.flush()
+
+
+def _read_matrix_action(fd: Optional[int]) -> Optional[str]:
+    try:
+        if os.name == "nt":
+            while True:
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    return "ENTER"
+                if ch == " ":
+                    return "ENTER"
+                if ch == "\x1b":
+                    return "ESC"
+                if ch in ("\x00", "\xe0"):
+                    code = msvcrt.getwch()
+                    mapping = {
+                        "H": "UP",
+                        "P": "DOWN",
+                        "I": "PAGE_UP",
+                        "Q": "PAGE_DOWN",
+                        "G": "HOME",
+                        "O": "END",
+                        "K": "LEFT",
+                        "M": "RIGHT",
+                    }
+                    action = mapping.get(code)
+                    if action in ("LEFT", "RIGHT"):
+                        continue
+                    if action:
+                        return action
+                    continue
+                if ch in ("k", "K", "w", "W"):
+                    return "UP"
+                if ch in ("j", "J", "s", "S"):
+                    return "DOWN"
+                if ch == "\t":
+                    return "ENTER"
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                # Ignore other keys
+        else:
+            ch = sys.stdin.read(1)
+            if not ch:
+                return None
+            if ch in ("\r", "\n"):
+                return "ENTER"
+            if ch == " ":
+                return "ENTER"
+            if ch == "\x1b":
+                seq = _read_escape_sequence()
+                if not seq:
+                    return "ESC"
+                action = _MATRIX_ESCAPE_MAP.get(seq)
+                if action:
+                    return action
+                return None
+            if ch in ("k", "K", "w", "W"):
+                return "UP"
+            if ch in ("j", "J", "s", "S"):
+                return "DOWN"
+            if ch == "\x7f":
+                return None
+            if ch == "\x03":
+                raise KeyboardInterrupt
+        return None
+    except KeyboardInterrupt:
+        raise
 
 
 if os.name != "nt":
-    from curses_nav import get_input as curses_get_input, interactive_menu as curses_menu
+    from curses_nav import get_input as curses_get_input
     get_input = curses_get_input
-    interactive_menu = curses_menu
 
 
 def _display_with_chafapy(image_path: Path) -> bool:
@@ -2110,7 +2422,6 @@ def choose_mode() -> str:
     options = [
         ("LLM Chat", "llm"),
         ("Image Generation", "image"),
-        ("Shodan Scan", "shodan"),
         ("[Exit]", "exit"),
     ]
     labels = [label for label, _ in options]
@@ -2131,32 +2442,68 @@ def dispatch_mode(mode_key: str) -> bool:
     return True
 
 
+def run_provider_actions(
+    provider_label: str,
+    handler: Callable[[], None],
+    api_type: str,
+) -> None:
+    """Present shared actions for a provider, including scoped Shodan scans."""
+
+    options = ["Servers", "Shodan Scan", "[Back]"]
+    header = f"{provider_label} Options:"
+
+    while True:
+        selection = _prompt_selection(header, options)
+        if selection is None or selection == len(options) - 1:
+            return
+        if selection == 0:
+            handler()
+            continue
+        if selection == 1:
+            run_shodan_scan(api_type)
+            continue
+
+
 def run_llm_menu() -> None:
-    providers = [("Ollama", "llm-ollama")]
-    labels = [label for label, _ in providers] + ["[Back]"]
+    providers = [
+        {
+            "label": "Ollama",
+            "handler": run_chat_mode,
+            "api_type": "ollama",
+        }
+    ]
+    labels = [provider["label"] for provider in providers] + ["[Back]"]
 
     while True:
         selection = _prompt_selection("Select LLM Provider:", labels)
         if selection is None or selection == len(labels) - 1:
             return
-        provider_key = providers[selection][1]
-        dispatch_mode(provider_key)
+        provider = providers[selection]
+        run_provider_actions(provider["label"], provider["handler"], provider["api_type"])
         return
 
 
 def run_image_menu() -> None:
     providers = [
-        ("InvokeAI", "image-invokeai"),
-        ("Automatic1111", "image-automatic1111"),
+        {
+            "label": "InvokeAI",
+            "handler": run_image_mode,
+            "api_type": "invokeai",
+        },
+        {
+            "label": "Automatic1111",
+            "handler": run_automatic1111_mode,
+            "api_type": "automatic1111",
+        },
     ]
-    labels = [label for label, _ in providers] + ["[Back]"]
+    labels = [provider["label"] for provider in providers] + ["[Back]"]
 
     while True:
         selection = _prompt_selection("Select Image Generation Provider:", labels)
         if selection is None or selection == len(labels) - 1:
             return
-        provider_key = providers[selection][1]
-        dispatch_mode(provider_key)
+        provider = providers[selection]
+        run_provider_actions(provider["label"], provider["handler"], provider["api_type"])
         return
 
 
@@ -2252,10 +2599,13 @@ def run_automatic1111_mode() -> None:
                 continue
 
 
-def run_shodan_scan() -> None:
+def run_shodan_scan(api_type: Optional[str] = None) -> None:
     clear_screen()
     script_path = Path(__file__).resolve().parent / "shodanscan.py"
-    cmd = [sys.executable, str(script_path)] + sys.argv[1:]
+    cmd = [sys.executable, str(script_path)]
+    if api_type:
+        cmd.extend(["--api-type", api_type])
+    cmd.extend(sys.argv[1:])
     try:
         subprocess.call(cmd)
     finally:
