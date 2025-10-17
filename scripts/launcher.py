@@ -101,6 +101,90 @@ def run_verbose() -> int | None:
     return idx if 0 <= idx < len(OPTIONS) else None
 
 
+def _menu_layout(header_lines: list[str], options: list[str]) -> dict[str, int | list[str]]:
+    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
+    header_lines = header_lines or [""]
+    max_option_width = max((len(opt) + 2 for opt in options), default=0)
+    inner_width = max(max(len(line) for line in header_lines), max_option_width)
+    width = inner_width + 2
+
+    header_height = len(header_lines) + 2
+    menu_height = len(options) + 2 if options else 0
+
+    header_x = max((columns - width) // 2, 0)
+    menu_x = max((columns - width) // 2, 0)
+
+    menu_y = max((rows - menu_height) // 2, 0) if menu_height else header_height
+    desired_menu_top = max(menu_y + 1, header_height + 1)
+    max_menu_top = max(1, rows - menu_height + 1) if menu_height else desired_menu_top
+    menu_top = min(desired_menu_top, max_menu_top)
+    spacer_lines = max(0, menu_top - header_height - 1)
+
+    layout: dict[str, int | list[str]] = {
+        "header_lines": header_lines,
+        "header_x": header_x,
+        "header_w": width,
+        "header_h": header_height,
+        "menu_x": menu_x,
+        "menu_w": width,
+        "menu_h": menu_height,
+        "menu_top": menu_top,
+        "spacer_lines": spacer_lines,
+        "columns": columns,
+        "rows": rows,
+    }
+
+    boxes = [
+        {
+            "top": 1,
+            "bottom": header_height,
+            "left": header_x + 1,
+            "right": header_x + width,
+        }
+    ]
+    if menu_height:
+        boxes.append(
+            {
+                "top": menu_top,
+                "bottom": menu_top + menu_height - 1,
+                "left": menu_x + 1,
+                "right": menu_x + width,
+            }
+        )
+    layout["boxes"] = boxes
+    return layout
+
+
+def _print_boxed_menu(layout: dict[str, int | list[str]], options: list[str], selected_idx: int) -> None:
+    header_lines = layout["header_lines"]  # type: ignore[assignment]
+    header_x = layout["header_x"]  # type: ignore[assignment]
+    header_w = layout["header_w"]  # type: ignore[assignment]
+    spacer_lines = layout["spacer_lines"]  # type: ignore[assignment]
+    menu_x = layout["menu_x"]  # type: ignore[assignment]
+    menu_w = layout["menu_w"]  # type: ignore[assignment]
+
+    print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
+    for line in header_lines:
+        print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
+    print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
+
+    for _ in range(spacer_lines):
+        print()
+
+    if not options:
+        return
+
+    print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
+    for idx, opt in enumerate(options):
+        prefix = "> " if idx == selected_idx else "  "
+        content = (prefix + opt)[: menu_w - 2]
+        line = content.ljust(menu_w - 2)
+        if idx == selected_idx:
+            line = f"{BOLD}{line}{RESET}{GREEN}"
+        print(f"{' ' * menu_x}{GREEN}│{line}│{RESET}")
+    print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+
+
 def _arrow_menu(header: str, labels: list[str]) -> int | None:
     """Simple arrow-key menu without matrix rain effects."""
 
@@ -108,6 +192,19 @@ def _arrow_menu(header: str, labels: list[str]) -> int | None:
         return None
 
     if os.name == "nt":
+        layout = _menu_layout([header], labels)
+        stop_event = threading.Event()
+        rain_thread = threading.Thread(
+            target=rain,
+            kwargs={
+                "persistent": True,
+                "stop_event": stop_event,
+                "boxes": layout["boxes"],
+                "clear_screen": False,
+            },
+            daemon=True,
+        )
+        rain_thread.start()
 
         def read_key() -> str | None:
             while True:
@@ -126,25 +223,50 @@ def _arrow_menu(header: str, labels: list[str]) -> int | None:
                     return "ENTER"
 
         idx = 0
-        while True:
-            os.system("cls")
-            print(f"{GREEN}{header}{RESET}")
-            for i, label in enumerate(labels):
-                prefix = "> " if i == idx else "  "
-                style = BOLD if i == idx else ""
-                print(f"{style}{GREEN}{prefix}{label}{RESET}")
+        cleared = False
+
+        def draw_menu(force: bool = False) -> None:
+            nonlocal cleared
+            if force or not cleared:
+                os.system("cls")
+                cleared = True
+            else:
+                print("\033[H", end="")
+            _print_boxed_menu(layout, labels, idx)
             sys.stdout.flush()
-            key = read_key()
-            if key == "UP":
-                idx = (idx - 1) % len(labels)
-            elif key == "DOWN":
-                idx = (idx + 1) % len(labels)
-            elif key == "ENTER":
-                return idx
-            elif key == "ESC":
-                return None
+
+        try:
+            draw_menu(force=True)
+            while True:
+                key = read_key()
+                if key == "UP":
+                    idx = (idx - 1) % len(labels)
+                    draw_menu()
+                elif key == "DOWN":
+                    idx = (idx + 1) % len(labels)
+                    draw_menu()
+                elif key == "ENTER":
+                    return idx
+                elif key == "ESC":
+                    return None
+        finally:
+            stop_event.set()
+            rain_thread.join()
 
     else:
+        layout = _menu_layout([header], labels)
+        stop_event = threading.Event()
+        rain_thread = threading.Thread(
+            target=rain,
+            kwargs={
+                "persistent": True,
+                "stop_event": stop_event,
+                "boxes": layout["boxes"],
+                "clear_screen": False,
+            },
+            daemon=True,
+        )
+        rain_thread.start()
 
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
@@ -158,9 +280,7 @@ def _arrow_menu(header: str, labels: list[str]) -> int | None:
                 ch = os.read(fd, 1).decode()
                 if not ch:
                     return None
-                if ch in ("\n", "\r"):
-                    return "ENTER"
-                if ch == " ":
+                if ch in ("\n", "\r", " "):
                     return "ENTER"
                 if ch == "\x1b":
                     r2, _, _ = select.select([sys.stdin], [], [], 0.01)
@@ -176,103 +296,87 @@ def _arrow_menu(header: str, labels: list[str]) -> int | None:
                     return "ESC"
 
         idx = 0
-        try:
-            while True:
+        cleared = False
+
+        def draw_menu(force: bool = False) -> None:
+            nonlocal cleared
+            if force or not cleared:
                 os.system("clear")
-                print(f"{GREEN}{header}{RESET}")
-                for i, label in enumerate(labels):
-                    prefix = "> " if i == idx else "  "
-                    style = BOLD if i == idx else ""
-                    print(f"{style}{GREEN}{prefix}{label}{RESET}")
-                sys.stdout.flush()
+                cleared = True
+            else:
+                print("\033[H", end="")
+            _print_boxed_menu(layout, labels, idx)
+            sys.stdout.flush()
+
+        try:
+            draw_menu(force=True)
+            while True:
                 key = read_key()
                 if key == "UP":
                     idx = (idx - 1) % len(labels)
+                    draw_menu()
                 elif key == "DOWN":
                     idx = (idx + 1) % len(labels)
+                    draw_menu()
                 elif key == "ENTER":
                     return idx
                 elif key == "ESC":
                     return None
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            stop_event.set()
+            rain_thread.join()
 
     return None
 
 
 def run_windows_menu() -> int | None:
     """Interactive menu using msvcrt for Windows with boxed layout."""
-    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
-    header_w = max(len(line) for line in HEADER_LINES) + 2
-    header_x = max((columns - header_w) // 2, 0)
-    header_h = len(HEADER_LINES) + 2
-
-    menu_w = max(len(opt) + 2 for opt in OPTIONS) + 2
-    menu_h = len(OPTIONS) + 2
-    menu_x = max((columns - menu_w) // 2, 0)
-    menu_y = max((rows - menu_h) // 2, 0)
-
-    boxes = [
-        {"top": 1, "bottom": header_h, "left": header_x + 1, "right": header_x + header_w},
-        {
-            "top": menu_y + 1,
-            "bottom": menu_y + menu_h,
-            "left": menu_x + 1,
-            "right": menu_x + menu_w,
-        },
-    ]
+    layout = _menu_layout(HEADER_LINES, OPTIONS)
     stop_event = threading.Event()
     rain_thread = threading.Thread(
         target=rain,
-        kwargs={"persistent": True, "stop_event": stop_event, "boxes": boxes, "clear_screen": False},
+        kwargs={
+            "persistent": True,
+            "stop_event": stop_event,
+            "boxes": layout["boxes"],
+            "clear_screen": False,
+        },
         daemon=True,
     )
     rain_thread.start()
 
     idx = 0
+    cleared = False
 
-    def draw_menu() -> None:
-        os.system("cls")
-        print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
-        for line in HEADER_LINES:
-            print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
-        print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
-
-        for _ in range(max(0, menu_y - header_h)):
-            print()
-        print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
-        for i, opt in enumerate(OPTIONS):
-            prefix = "> " if i == idx else "  "
-            line = prefix + opt
-            print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
-        print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+    def draw_menu(force: bool = False) -> None:
+        nonlocal cleared
+        if force or not cleared:
+            os.system("cls")
+            cleared = True
+        else:
+            print("\033[H", end="")
+        _print_boxed_menu(layout, OPTIONS, idx)
         sys.stdout.flush()
 
     try:
-        draw_menu()
-        last_refresh = time.time()
+        draw_menu(force=True)
         while True:
-            if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch in ("\r", "\n"):
-                    return idx
-                if ch == "\x1b":
-                    return None
-                if ch in ("\x00", "\xe0"):
-                    ch2 = msvcrt.getwch()
-                    if ch2 == "H":
-                        idx = (idx - 1) % len(OPTIONS)
-                        draw_menu()
-                        last_refresh = time.time()
-                    elif ch2 == "P":
-                        idx = (idx + 1) % len(OPTIONS)
-                        draw_menu()
-                        last_refresh = time.time()
-            else:
-                if time.time() - last_refresh > 0.5:
+            ch = msvcrt.getwch()
+            if ch in ("\r", "\n"):
+                return idx
+            if ch == "\x1b":
+                return None
+            if ch in ("\x00", "\xe0"):
+                ch2 = msvcrt.getwch()
+                if ch2 == "H":
+                    idx = (idx - 1) % len(OPTIONS)
                     draw_menu()
-                    last_refresh = time.time()
-                time.sleep(0.05)
+                elif ch2 == "P":
+                    idx = (idx + 1) % len(OPTIONS)
+                    draw_menu()
+            elif ch == " ":
+                return idx
     finally:
         stop_event.set()
         rain_thread.join()
@@ -280,31 +384,16 @@ def run_windows_menu() -> int | None:
 
 def run_unix_menu() -> int | None:
     """Interactive menu for Unix-like systems with matrix rain."""
-
-    columns, rows = shutil.get_terminal_size(fallback=(80, 24))
-    header_w = max(len(line) for line in HEADER_LINES) + 2
-    header_x = max((columns - header_w) // 2, 0)
-    header_h = len(HEADER_LINES) + 2
-
-    menu_w = max(len(opt) + 2 for opt in OPTIONS) + 2
-    menu_h = len(OPTIONS) + 2
-    menu_x = max((columns - menu_w) // 2, 0)
-    menu_y = max((rows - menu_h) // 2, 0)
-
-    boxes = [
-        {"top": 1, "bottom": header_h, "left": header_x + 1, "right": header_x + header_w},
-        {
-            "top": menu_y + 1,
-            "bottom": menu_y + menu_h,
-            "left": menu_x + 1,
-            "right": menu_x + menu_w,
-        },
-    ]
-
+    layout = _menu_layout(HEADER_LINES, OPTIONS)
     stop_event = threading.Event()
     rain_thread = threading.Thread(
         target=rain,
-        kwargs={"persistent": True, "stop_event": stop_event, "boxes": boxes, "clear_screen": False},
+        kwargs={
+            "persistent": True,
+            "stop_event": stop_event,
+            "boxes": layout["boxes"],
+            "clear_screen": False,
+        },
         daemon=True,
     )
     rain_thread.start()
@@ -314,54 +403,47 @@ def run_unix_menu() -> int | None:
     tty.setcbreak(fd)
 
     idx = 0
+    cleared = False
 
-    def draw_menu() -> None:
-        os.system("clear")
-        print(f"{' ' * header_x}{GREEN}┌{'─' * (header_w - 2)}┐{RESET}")
-        for line in HEADER_LINES:
-            print(f"{' ' * header_x}{GREEN}│{line.center(header_w - 2)}│{RESET}")
-        print(f"{' ' * header_x}{GREEN}└{'─' * (header_w - 2)}┘{RESET}")
-
-        for _ in range(max(0, menu_y - header_h)):
-            print()
-        print(f"{' ' * menu_x}{GREEN}┌{'─' * (menu_w - 2)}┐{RESET}")
-        for i, opt in enumerate(OPTIONS):
-            prefix = "> " if i == idx else "  "
-            line = prefix + opt
-            print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
-        print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+    def draw_menu(force: bool = False) -> None:
+        nonlocal cleared
+        if force or not cleared:
+            os.system("clear")
+            cleared = True
+        else:
+            print("\033[H", end="")
+        _print_boxed_menu(layout, OPTIONS, idx)
         sys.stdout.flush()
 
     try:
-        draw_menu()
-        last_refresh = time.time()
+        draw_menu(force=True)
         while True:
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if r:
-                ch = os.read(fd, 1).decode()
-                if ch in ("\n", "\r"):
-                    return idx
-                if ch == "\x1b":
-                    r2, _, _ = select.select([sys.stdin], [], [], 0.0001)
-                    if r2:
-                        ch2 = os.read(fd, 1).decode()
-                        if ch2 == "[":
-                            ch3 = os.read(fd, 1).decode()
-                            if ch3 == "A":
-                                idx = (idx - 1) % len(OPTIONS)
-                                draw_menu()
-                                last_refresh = time.time()
-                            elif ch3 == "B":
-                                idx = (idx + 1) % len(OPTIONS)
-                                draw_menu()
-                                last_refresh = time.time()
-                        else:
-                            return None
-                    else:
-                        return None
-            elif time.time() - last_refresh > 0.5:
-                draw_menu()
-                last_refresh = time.time()
+            r, _, _ = select.select([sys.stdin], [], [], None)
+            if not r:
+                continue
+            ch = os.read(fd, 1).decode()
+            if not ch:
+                continue
+            if ch in ("\n", "\r"):
+                return idx
+            if ch == " ":
+                return idx
+            if ch == "\x1b":
+                r2, _, _ = select.select([sys.stdin], [], [], 0.0001)
+                if r2:
+                    ch2 = os.read(fd, 1).decode()
+                    if ch2 == "[":
+                        ch3 = os.read(fd, 1).decode()
+                        if ch3 == "A":
+                            idx = (idx - 1) % len(OPTIONS)
+                            draw_menu()
+                            continue
+                        if ch3 == "B":
+                            idx = (idx + 1) % len(OPTIONS)
+                            draw_menu()
+                            continue
+                    return None
+                return None
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         stop_event.set()
