@@ -23,42 +23,52 @@ HEADER_LINES = [
 TOP_LEVEL_OPTIONS = [
     {"label": "LLM Chat", "key": "llm"},
     {"label": "Image Generation", "key": "image"},
-    {"label": "Shodan Scan", "key": "shodan"},
     {"label": "[Exit]", "key": "exit"},
 ]
 
 PROVIDER_OPTIONS = {
     "llm": [
         {
-            "label": "Ollama",
+            "label": "Ollama Servers",
             "script": "TerminalAI.py",
             "extra_args": ["--mode", "llm-ollama"],
             "clear_before": False,
+        },
+        {
+            "label": "Ollama Shodan Scan",
+            "script": "shodanscan.py",
+            "extra_args": ["--api-type", "ollama"],
         },
         {"label": "[Back]", "key": "back"},
     ],
     "image": [
         {
-            "label": "InvokeAI",
+            "label": "InvokeAI Servers",
             "script": "TerminalAI.py",
             "extra_args": ["--mode", "image-invokeai"],
         },
         {
-            "label": "Automatic1111",
+            "label": "InvokeAI Shodan Scan",
+            "script": "shodanscan.py",
+            "extra_args": ["--api-type", "invokeai"],
+        },
+        {
+            "label": "Automatic1111 Servers",
             "script": "TerminalAI.py",
             "extra_args": ["--mode", "image-automatic1111"],
+        },
+        {
+            "label": "Automatic1111 Shodan Scan",
+            "script": "shodanscan.py",
+            "extra_args": ["--api-type", "automatic1111"],
         },
         {"label": "[Back]", "key": "back"},
     ],
 }
 
 PROVIDER_HEADERS = {
-    "llm": "Select LLM Provider:",
-    "image": "Select Image Generation Provider:",
-}
-
-DIRECT_ACTIONS = {
-    "shodan": {"label": "Shodan Scan", "script": "shodanscan.py"},
+    "llm": "Select LLM Action:",
+    "image": "Select Image Generation Action:",
 }
 
 OPTIONS = [opt["label"] for opt in TOP_LEVEL_OPTIONS]
@@ -123,6 +133,7 @@ def _arrow_menu(header: str, labels: list[str]) -> int | None:
                 prefix = "> " if i == idx else "  "
                 style = BOLD if i == idx else ""
                 print(f"{style}{GREEN}{prefix}{label}{RESET}")
+            sys.stdout.flush()
             key = read_key()
             if key == "UP":
                 idx = (idx - 1) % len(labels)
@@ -173,6 +184,7 @@ def _arrow_menu(header: str, labels: list[str]) -> int | None:
                     prefix = "> " if i == idx else "  "
                     style = BOLD if i == idx else ""
                     print(f"{style}{GREEN}{prefix}{label}{RESET}")
+                sys.stdout.flush()
                 key = read_key()
                 if key == "UP":
                     idx = (idx - 1) % len(labels)
@@ -234,9 +246,11 @@ def run_windows_menu() -> int | None:
             line = prefix + opt
             print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
         print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+        sys.stdout.flush()
 
     try:
         draw_menu()
+        last_refresh = time.time()
         while True:
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
@@ -249,10 +263,15 @@ def run_windows_menu() -> int | None:
                     if ch2 == "H":
                         idx = (idx - 1) % len(OPTIONS)
                         draw_menu()
+                        last_refresh = time.time()
                     elif ch2 == "P":
                         idx = (idx + 1) % len(OPTIONS)
                         draw_menu()
+                        last_refresh = time.time()
             else:
+                if time.time() - last_refresh > 0.5:
+                    draw_menu()
+                    last_refresh = time.time()
                 time.sleep(0.05)
     finally:
         stop_event.set()
@@ -311,9 +330,11 @@ def run_unix_menu() -> int | None:
             line = prefix + opt
             print(f"{' ' * menu_x}{GREEN}│{line.ljust(menu_w - 2)}│{RESET}")
         print(f"{' ' * menu_x}{GREEN}└{'─' * (menu_w - 2)}┘{RESET}")
+        sys.stdout.flush()
 
     try:
         draw_menu()
+        last_refresh = time.time()
         while True:
             r, _, _ = select.select([sys.stdin], [], [], 0.05)
             if r:
@@ -329,13 +350,18 @@ def run_unix_menu() -> int | None:
                             if ch3 == "A":
                                 idx = (idx - 1) % len(OPTIONS)
                                 draw_menu()
+                                last_refresh = time.time()
                             elif ch3 == "B":
                                 idx = (idx + 1) % len(OPTIONS)
                                 draw_menu()
+                                last_refresh = time.time()
                         else:
                             return None
                     else:
                         return None
+            elif time.time() - last_refresh > 0.5:
+                draw_menu()
+                last_refresh = time.time()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         stop_event.set()
@@ -422,14 +448,12 @@ def main() -> None:
         if key == "exit":
             return
 
-        if key in PROVIDER_OPTIONS:
-            option = prompt_provider_menu(key)
-            if option is None:
-                continue
-        else:
-            option = DIRECT_ACTIONS.get(key)
-            if option is None:
-                continue
+        if key not in PROVIDER_OPTIONS:
+            continue
+
+        option = prompt_provider_menu(key)
+        if option is None:
+            continue
 
         run_selected_option(option, args, script_dir)
 
