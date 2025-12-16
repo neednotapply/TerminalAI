@@ -4,3 +4,4 @@ shodan
 colorama
 chafa.py
 Pillow
+discord.py>=2.3.0

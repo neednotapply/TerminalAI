@@ -21,7 +21,7 @@ TerminalAI is a retro-styled client for chatting with Ollama models, generating 
 3. **Prepare data files**
    - Copy `data/ollama.endpoints.example.csv` to `data/ollama.endpoints.csv` and add any known Ollama servers.
    - Copy `data/invoke.endpoints.example.csv` to `data/invoke.endpoints.csv` for InvokeAI hosts.
-   - (Optional) Create `data/config.json` or set the `SHODAN_API_KEY` environment variable for Shodan queries. A template is available at `data/config.example.json`.
+   - (Optional) Create `data/config.json` to store your Shodan API key and Discord bot settings (`DISCORD_BOT_TOKEN`, `TERMINALAI_WORKING_DIR`). A template is available at `data/config.example.json`.
 
 ## Usage
 
@@ -51,6 +51,34 @@ The client loads servers from `data/ollama.endpoints.csv` (for chat) and `data/i
 InvokeAI image generation is available from the main TerminalAI menu. The client automatically discovers active InvokeAI servers from the shared endpoint list, lists the models each host exposes, and walks through prompt configuration (including width/height, steps, CFG scale, scheduler, and optional seed). Generated images are downloaded to `data/images/` along with per-render metadata.
 
 TerminalAI renders image previews directly in the terminal using [chafa.py](https://github.com/GuardKenzie/chafa.py) (with [Pillow](https://python-pillow.org/)) and will fall back to the [chafa](https://hpjansson.org/chafa/) CLI if the Python bindings are unavailable.
+
+### Discord Bot (optional)
+
+An optional Discord bot mirrors the launcher menus with per-user, ephemeral interactions. Both chat and image-generation flows are available in Discord through the same menu groupings used by the launcher.
+
+1. Install dependencies if you haven't already:
+
+   ```bash
+   cd scripts
+   pip3 install -r requirements.txt
+   ```
+
+2. Add your Discord settings to `data/config.json`:
+
+   ```json
+   {
+     "DISCORD_BOT_TOKEN": "<your token>",
+     "TERMINALAI_WORKING_DIR": "optional/path/if/scripts/aren't/in/PWD"
+   }
+   ```
+
+3. Start the bot:
+
+   ```bash
+   python3 discord_bot.py
+   ```
+
+The bot exposes a `/terminalai` command that opens the same menus you see in the launcher. Shodan scans run directly from Discord; interactive flows (including chat and image generation) provide the exact terminal command to execute locally.
 
 ### Shodan Scan
 
