@@ -6,7 +6,6 @@ user receives a private menu and history of the options they select.
 
 Environment variables:
 - DISCORD_BOT_TOKEN: required Discord bot token.
-- TERMINALAI_WORKING_DIR: optional working directory when running menu actions.
 
 The bot is intentionally light-weight and only runs actions that are
 non-interactive inside Discord (for example Shodan scans). Interactive
@@ -50,8 +49,7 @@ CONFIG = _load_config()
 
 
 def _working_directory() -> Path:
-    base = CONFIG.get("TERMINALAI_WORKING_DIR") or os.getenv("TERMINALAI_WORKING_DIR")
-    return Path(base).expanduser().resolve() if base else Path(__file__).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 @dataclass
