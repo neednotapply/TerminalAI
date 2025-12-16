@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import requests
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -55,6 +57,30 @@ def _working_directory() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _parse_models(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    normalized = raw.replace("|", ";").replace(",", ";").replace("\n", ";")
+    return [model.strip() for model in normalized.split(";") if model.strip()]
+
+
+def _first_value(raw: Optional[str]) -> str:
+    if not raw:
+        return ""
+    for separator in (";", ",", " "):
+        if separator in raw:
+            return raw.split(separator, 1)[0].strip()
+    return str(raw).strip()
+
+
+def _compose_content(header: str, session: MenuSession, chat: Optional["ChatContext"] = None) -> str:
+    parts = [header]
+    if chat:
+        parts.append(chat.describe())
+    parts.append(session.history_message())
+    return "\n\n".join(part for part in parts if part)
+
+
 @dataclass
 class MenuSession:
     """Per-user session that stores menu selections."""
@@ -62,6 +88,10 @@ class MenuSession:
     user_id: int
     history: List[str] = field(default_factory=list)
     top_key: Optional[str] = None
+    mode: Optional[str] = None
+    endpoints: List[dict] = field(default_factory=list)
+    provider_label: Optional[str] = None
+    chat: Optional["ChatContext"] = None
 
     def log(self, entry: str) -> None:
         self.history.append(entry)
@@ -82,6 +112,65 @@ def _reset_session(user_id: int) -> MenuSession:
     session = MenuSession(user_id=user_id)
     _sessions[user_id] = session
     return session
+
+
+@dataclass
+class ChatContext:
+    endpoint: dict
+    mode: str
+    model: Optional[str] = None
+    messages: List[dict] = field(default_factory=list)
+    available_models: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.available_models:
+            self.available_models = _parse_models(self.endpoint.get("available_models"))
+        if not self.model and self.available_models:
+            self.model = self.available_models[0]
+
+    @property
+    def base_url(self) -> Optional[str]:
+        host = _first_value(self.endpoint.get("ip") or self.endpoint.get("hostnames"))
+        port = _first_value(self.endpoint.get("port"))
+        if not host or not port:
+            return None
+        return f"http://{host}:{port}"
+
+    def describe(self) -> str:
+        name = self.endpoint.get("id") or "Selected endpoint"
+        host = _first_value(self.endpoint.get("ip") or self.endpoint.get("hostnames"))
+        port = _first_value(self.endpoint.get("port"))
+        details = f"{name}: {host}:{port}" if host or port else name
+        model_line = self.model or "Select a model to begin chatting."
+        transcript = self._transcript_preview()
+        parts = [
+            f"Server: {details}",
+            f"Mode: `{self.mode}`",
+            f"Active model: {model_line}",
+            transcript,
+        ]
+        return "\n".join(part for part in parts if part)
+
+    def _transcript_preview(self) -> str:
+        if not self.messages:
+            return ""
+        preview_lines = []
+        for entry in self.messages[-6:]:
+            role = entry.get("role")
+            content = (entry.get("content") or "").replace("`", "'")
+            label = "You" if role == "user" else "Assistant"
+            truncated = (content[:180] + "…") if len(content) > 180 else content
+            preview_lines.append(f"{label}: {truncated}")
+        return "\n".join(preview_lines)
+
+
+async def _update_menu_message(
+    interaction: discord.Interaction, content: str, view: Optional[discord.ui.View]
+) -> None:
+    if interaction.response.is_done():
+        await interaction.edit_original_response(content=content, view=view)
+    else:
+        await interaction.response.edit_message(content=content, view=view)
 
 
 async def _run_shodan_scan(option: dict, interaction: discord.Interaction) -> str:
@@ -173,6 +262,83 @@ def _load_endpoints(mode: str) -> List[dict]:
     return rows
 
 
+def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
+    base_url = chat.base_url
+    if not base_url:
+        return []
+    try:
+        resp = requests.get(f"{base_url}/v1/models", timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError):
+        return []
+
+    models: List[str] = []
+    for entry in payload.get("models") or payload.get("data") or []:
+        if isinstance(entry, dict):
+            candidate = entry.get("id") or entry.get("name") or entry.get("model")
+        else:
+            candidate = str(entry)
+        if candidate:
+            models.append(str(candidate))
+    return [model for model in models if model]
+
+
+def _extract_chat_content(payload: dict) -> Optional[str]:
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message") or first.get("delta") or {}
+            if isinstance(message, dict):
+                content = message.get("content")
+                if content:
+                    return content
+    for key in ("message", "response", "content", "text"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
+def _send_chat_message(chat: ChatContext, prompt: str) -> str:
+    base_url = chat.base_url
+    if not base_url:
+        return "The selected server is missing connection details."
+
+    chat_paths = ["/v1/chat/completions", "/api/chat", "/chat"]
+    payload = {
+        "model": chat.model,
+        "messages": chat.messages + [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+
+    last_error = ""
+    for path in chat_paths:
+        try:
+            resp = requests.post(f"{base_url}{path}", json=payload, timeout=30)
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            content = _extract_chat_content(data)
+            if not content:
+                last_error = "Server returned an empty response."
+                continue
+            chat.messages.append({"role": "user", "content": prompt})
+            chat.messages.append({"role": "assistant", "content": content})
+            return content
+        except requests.RequestException as exc:  # pragma: no cover - network failures
+            last_error = str(exc)
+        except ValueError:
+            last_error = "Invalid JSON response"
+    return f"Failed to chat with the server. {last_error or 'No supported endpoints responded.'}"
+
+
+def _trim_discord_message(content: str, limit: int = 1800) -> str:
+    return content if len(content) <= limit else content[: limit - 1] + "…"
+
+
 class ProviderSelect(discord.ui.Select):
     def __init__(self, top_key: str, session: MenuSession):
         options_config = PROVIDER_OPTIONS.get(top_key, [])
@@ -200,14 +366,23 @@ class ProviderSelect(discord.ui.Select):
         if option.get("script") == "TerminalAI.py":
             mode = _mode_from_args(option.get("extra_args", [])) or ""
             endpoints = _load_endpoints(mode)
+            self.session.mode = mode
+            self.session.endpoints = endpoints
+            self.session.provider_label = label
+            self.session.chat = None
             if endpoints:
                 view = discord.ui.View(timeout=300)
-                view.add_item(EndpointSelect(label, endpoints, mode))
-                await interaction.response.send_message(
-                    f"Select a server for **{label}**:", view=view, ephemeral=True
+                view.add_item(EndpointSelect(label, endpoints, mode, self.session))
+                content = _compose_content(
+                    f"Select a server for **{label}**:", self.session
                 )
-                await interaction.followup.send(self.session.history_message(), ephemeral=True)
+                await _update_menu_message(interaction, content, view)
                 return
+            content = _compose_content(
+                f"No servers found for **{label}**.", self.session
+            )
+            await _update_menu_message(interaction, content, None)
+            return
 
         if not interaction.response.is_done():
             defer_kwargs = {"ephemeral": True}
@@ -216,12 +391,16 @@ class ProviderSelect(discord.ui.Select):
             await interaction.response.defer(**defer_kwargs)
 
         message = await _handle_option(option, interaction)
-        await interaction.followup.send(message, ephemeral=True)
-        await interaction.followup.send(self.session.history_message(), ephemeral=True)
+        followup_view = discord.ui.View(timeout=300)
+        followup_view.add_item(ProviderSelect(self.top_key, self.session))
+        content = _compose_content(_trim_discord_message(message), self.session)
+        await interaction.edit_original_response(content=content, view=followup_view)
 
 
 class EndpointSelect(discord.ui.Select):
-    def __init__(self, provider_label: str, endpoints: List[dict], mode: str):
+    def __init__(
+        self, provider_label: str, endpoints: List[dict], mode: str, session: MenuSession
+    ):
         options = []
         for idx, endpoint in enumerate(endpoints):
             label = endpoint.get("id") or endpoint.get("hostnames") or "Unnamed"
@@ -240,24 +419,207 @@ class EndpointSelect(discord.ui.Select):
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
         self.endpoints = endpoints
         self.mode = mode
+        self.provider_label = provider_label
+        self.session = session
 
     async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
         idx = int(self.values[0])
         endpoint = self.endpoints[idx]
 
-        name = endpoint.get("id") or "Selected endpoint"
-        host = endpoint.get("ip") or endpoint.get("hostnames") or ""
-        port = endpoint.get("port") or ""
-        models = endpoint.get("available_models") or ""
+        chat = ChatContext(endpoint=endpoint, mode=self.mode)
+        self.session.chat = chat
+        self.session.log(f"{self.provider_label} -> {endpoint.get('id') or 'endpoint'}")
+        self.session.endpoints = self.endpoints
 
-        details = f"{name}: {host}:{port}" if host or port else name
-        model_line = f"\nModels: {models}" if models else ""
-
-        await interaction.response.send_message(
-            f"{details}\nMode: `{self.mode}`{model_line}\n"
-            "This action is interactive in the terminal. Run it locally with the selected server.",
-            ephemeral=True,
+        content = _compose_content(
+            "Server selected. Pick a model and start chatting.", self.session, chat
         )
+        await _update_menu_message(interaction, content, ChatView(self.session))
+
+
+class ModelSelect(discord.ui.Select):
+    def __init__(self, session: MenuSession):
+        self.session = session
+        chat = session.chat
+        options = []
+        if chat:
+            for model in chat.available_models:
+                options.append(
+                    discord.SelectOption(
+                        label=model[:100],
+                        value=model,
+                        default=bool(chat.model and chat.model == model),
+                    )
+                )
+        if not options:
+            options.append(discord.SelectOption(label="No models available", value=""))
+
+        super().__init__(
+            placeholder="Pick a model",
+            options=options,
+            min_values=1,
+            max_values=1,
+            disabled=not chat or not chat.available_models,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        chat = self.session.chat
+        if not chat:
+            content = _compose_content(
+                "Select a server before choosing a model.", self.session, None
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        new_model = self.values[0]
+        if not new_model:
+            content = _compose_content(
+                "No models are available for this server yet.", self.session, chat
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        chat.model = new_model
+        self.session.log(f"Model -> {new_model}")
+        content = _compose_content(
+            "Model selected. Send a prompt to chat.", self.session, chat
+        )
+        await _update_menu_message(interaction, content, ChatView(self.session))
+
+
+class RefreshModelsButton(discord.ui.Button):
+    def __init__(self, session: MenuSession):
+        super().__init__(label="Refresh models", style=discord.ButtonStyle.secondary)
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        chat = self.session.chat
+        if not chat:
+            content = _compose_content(
+                "Select a server to refresh its models.", self.session, None
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        models = await asyncio.to_thread(_fetch_endpoint_models, chat)
+        if models:
+            chat.available_models = models
+            if chat.model not in models:
+                chat.model = models[0]
+            message = "Model list refreshed from the server."
+            self.session.log("Models refreshed")
+        else:
+            message = "Failed to refresh models from the server."
+
+        content = _compose_content(message, self.session, chat)
+        await interaction.edit_original_response(
+            content=_trim_discord_message(content), view=ChatView(self.session)
+        )
+
+
+class ChangeServerButton(discord.ui.Button):
+    def __init__(self, session: MenuSession):
+        super().__init__(label="Change server", style=discord.ButtonStyle.secondary)
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        if not self.session.endpoints:
+            content = _compose_content(
+                "No server list available. Pick a menu again with /terminalai.",
+                self.session,
+                self.session.chat,
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        mode = self.session.mode or (self.session.chat.mode if self.session.chat else "")
+        view = discord.ui.View(timeout=300)
+        view.add_item(
+            EndpointSelect(
+                self.session.provider_label or "Server",
+                self.session.endpoints,
+                mode,
+                self.session,
+            )
+        )
+        content = _compose_content(
+            f"Select a server for **{self.session.provider_label or 'server'}**:",
+            self.session,
+            self.session.chat,
+        )
+        await _update_menu_message(interaction, content, view)
+
+
+class PromptModal(discord.ui.Modal):
+    def __init__(self, session: MenuSession):
+        super().__init__(title="Send a prompt")
+        self.session = session
+        self.prompt: discord.ui.TextInput = discord.ui.TextInput(
+            label="Prompt",
+            style=discord.TextStyle.long,
+            required=True,
+            max_length=800,
+            placeholder="Ask a question for the selected model",
+        )
+        self.add_item(self.prompt)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        chat = self.session.chat
+        if not chat or not chat.model:
+            content = _compose_content(
+                "Select a server and model before chatting.", self.session, chat
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        prompt_text = str(self.prompt.value).strip()
+        if not prompt_text:
+            content = _compose_content("Prompt cannot be empty.", self.session, chat)
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.session.log(f"Prompt -> {chat.model}")
+        reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
+        header = f"You: {prompt_text}\nAssistant: {reply}"
+        content = _compose_content(_trim_discord_message(header), self.session, chat)
+        await interaction.edit_original_response(content=content, view=ChatView(self.session))
+
+
+class PromptButton(discord.ui.Button):
+    def __init__(self, session: MenuSession):
+        super().__init__(label="Send prompt", style=discord.ButtonStyle.primary)
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        chat = self.session.chat
+        if not chat:
+            content = _compose_content(
+                "Select a server before sending prompts.", self.session, None
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+        if not chat.model:
+            content = _compose_content(
+                "Choose a model before chatting.", self.session, chat
+            )
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        await interaction.response.send_modal(PromptModal(self.session))
+
+
+class ChatView(discord.ui.View):
+    def __init__(self, session: MenuSession):
+        super().__init__(timeout=300)
+        self.session = session
+
+        if session.chat:
+            self.add_item(ModelSelect(session))
+        self.add_item(RefreshModelsButton(session))
+        self.add_item(PromptButton(session))
+        self.add_item(ChangeServerButton(session))
 
 
 class TopMenuView(discord.ui.View):
@@ -285,22 +647,23 @@ class TopMenuView(discord.ui.View):
         self.session.log(f"Selected top-level menu: {key}")
 
         if key == "exit":
-            await interaction.response.send_message(
-                "Session closed. Use /terminalai to start again.", ephemeral=True
+            await _update_menu_message(
+                interaction, "Session closed. Use /terminalai to start again.", None
             )
             return
 
         if key not in PROVIDER_OPTIONS:
-            await interaction.response.send_message(
-                "That menu isn't available yet.", ephemeral=True
+            await _update_menu_message(
+                interaction, _compose_content("That menu isn't available yet.", self.session), self
             )
             return
 
         view = discord.ui.View(timeout=300)
         view.add_item(ProviderSelect(key, self.session))
-        await interaction.response.send_message(
-            f"You picked **{key}**. Choose an action below:", view=view, ephemeral=True
+        content = _compose_content(
+            f"You picked **{key}**. Choose an action below:", self.session
         )
+        await _update_menu_message(interaction, content, view)
 
 
 class TerminalAIDiscord(commands.Bot):
