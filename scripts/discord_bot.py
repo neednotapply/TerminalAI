@@ -34,6 +34,13 @@ from discord.ext import commands
 
 # Reuse the launcher menu configuration so Discord stays in sync.
 from launcher import PROVIDER_HEADERS, PROVIDER_OPTIONS, TOP_LEVEL_OPTIONS
+from invoke_client import InvokeAIClient, InvokeAIClientError
+from TerminalAI import (
+    TERMINALAI_BOARD_ID_ERROR_MESSAGE,
+    TERMINALAI_BOARD_NAME,
+    _normalize_board_id,
+    _is_valid_terminalai_board_id,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -121,6 +128,8 @@ class ChatContext:
     model: Optional[str] = None
     messages: List[dict] = field(default_factory=list)
     available_models: List[str] = field(default_factory=list)
+    board_notice: Optional[str] = None
+    board_error: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.available_models:
@@ -263,6 +272,11 @@ def _load_endpoints(mode: str) -> List[dict]:
 
 
 def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
+    chat.board_error = None
+    chat.board_notice = None
+    if chat.mode == "image-invokeai":
+        return _fetch_invoke_models(chat)
+
     base_url = chat.base_url
     if not base_url:
         return []
@@ -299,6 +313,50 @@ def _extract_chat_content(payload: dict) -> Optional[str]:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
     return None
+
+
+def _fetch_invoke_models(chat: ChatContext) -> List[str]:
+    host = _first_value(chat.endpoint.get("ip") or chat.endpoint.get("hostnames"))
+    port = _first_value(chat.endpoint.get("port"))
+    if not host or not port:
+        chat.board_error = "Selected server is missing connection details."
+        return []
+
+    try:
+        client = InvokeAIClient(host, int(port), chat.endpoint.get("id") or host, DATA_DIR)
+    except (TypeError, ValueError) as exc:
+        chat.board_error = f"Unable to connect to InvokeAI server: {exc}"
+        return []
+
+    try:
+        board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+    except InvokeAIClientError as exc:
+        chat.board_error = str(exc)
+        return []
+    except requests.RequestException as exc:
+        chat.board_error = f"Network error while verifying InvokeAI board: {exc}"
+        return []
+
+    if not _is_valid_terminalai_board_id(board_id):
+        chat.board_error = TERMINALAI_BOARD_ID_ERROR_MESSAGE
+        return []
+
+    normalized_id = _normalize_board_id(board_id) or board_id
+    chat.board_notice = (
+        f"Images will be saved to board {TERMINALAI_BOARD_NAME} (id: {normalized_id})."
+    )
+
+    try:
+        models = client.list_models()
+    except InvokeAIClientError as exc:
+        chat.board_error = str(exc)
+        return []
+    except requests.RequestException as exc:
+        chat.board_error = f"Network error while fetching InvokeAI models: {exc}"
+        return []
+
+    names = [model.name for model in models if getattr(model, "name", None)]
+    return [name for name in names if name]
 
 
 def _send_chat_message(chat: ChatContext, prompt: str) -> str:
@@ -431,8 +489,32 @@ class EndpointSelect(discord.ui.Select):
         self.session.log(f"{self.provider_label} -> {endpoint.get('id') or 'endpoint'}")
         self.session.endpoints = self.endpoints
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        fetched_models = await asyncio.to_thread(_fetch_endpoint_models, chat)
+        if chat.board_error:
+            content = _compose_content(chat.board_error, self.session, chat)
+            await _update_menu_message(interaction, content, ChatView(self.session))
+            return
+
+        if fetched_models:
+            chat.available_models = fetched_models
+            if chat.model not in fetched_models:
+                chat.model = fetched_models[0]
+            model_message = "Server selected. Pick a model and start chatting."
+        elif chat.available_models:
+            model_message = "Server selected. Using configured models for this server."
+        else:
+            model_message = (
+                "Server selected, but no models are available yet. "
+                "Use **Refresh models** after the server finishes loading."
+            )
+
+        if chat.board_notice:
+            model_message = f"{chat.board_notice}\n{model_message}"
+
         content = _compose_content(
-            "Server selected. Pick a model and start chatting.", self.session, chat
+            model_message, self.session, chat
         )
         await _update_menu_message(interaction, content, ChatView(self.session))
 
@@ -461,7 +543,11 @@ class ModelSelect(discord.ui.Select):
         else:
             placeholder = "Pick a model"
         if not options:
-            options.append(discord.SelectOption(label="No models available", value=""))
+            options.append(
+                discord.SelectOption(
+                    label="No models available", value="no-models", default=True
+                )
+            )
 
         super().__init__(
             placeholder=placeholder,
@@ -512,6 +598,13 @@ class RefreshModelsButton(discord.ui.Button):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         models = await asyncio.to_thread(_fetch_endpoint_models, chat)
+        if chat.board_error:
+            content = _compose_content(chat.board_error, self.session, chat)
+            await interaction.edit_original_response(
+                content=_trim_discord_message(content), view=ChatView(self.session)
+            )
+            return
+
         if models:
             chat.available_models = models
             if chat.model not in models:
@@ -520,6 +613,9 @@ class RefreshModelsButton(discord.ui.Button):
             self.session.log("Models refreshed")
         else:
             message = "Failed to refresh models from the server."
+
+        if chat.board_notice:
+            message = f"{chat.board_notice}\n{message}"
 
         content = _compose_content(message, self.session, chat)
         await interaction.edit_original_response(
