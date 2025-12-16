@@ -355,6 +355,15 @@ def _fetch_invoke_models(chat: ChatContext) -> List[str]:
         return []
 
     try:
+        client.check_health()
+    except InvokeAIClientError as exc:
+        chat.board_error = str(exc)
+        return []
+    except requests.RequestException as exc:
+        chat.board_error = f"Network error while verifying InvokeAI server: {exc}"
+        return []
+
+    try:
         board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
     except InvokeAIClientError as exc:
         chat.board_error = str(exc)

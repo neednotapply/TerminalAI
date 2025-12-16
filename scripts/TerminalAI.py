@@ -3794,6 +3794,17 @@ def run_image_mode():
 
         client = InvokeAIClient(selected_server["ip"], port, selected_server["nickname"], DATA_DIR)
         try:
+            client.check_health()
+        except InvokeAIClientError as exc:
+            print(f"{RED}{exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+        except requests.RequestException as exc:
+            print(f"{RED}Network error while verifying InvokeAI server: {exc}{RESET}")
+            get_input(f"{CYAN}Press Enter to pick another server{RESET}")
+            continue
+
+        try:
             board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
