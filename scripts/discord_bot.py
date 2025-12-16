@@ -16,6 +16,7 @@ would normally be run locally.
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import os
 import sys
@@ -74,11 +75,11 @@ class MenuSession:
 _sessions: Dict[int, MenuSession] = {}
 
 
-def _get_session(user_id: int) -> MenuSession:
-    session = _sessions.get(user_id)
-    if session is None:
-        session = MenuSession(user_id=user_id)
-        _sessions[user_id] = session
+def _reset_session(user_id: int) -> MenuSession:
+    """Create a fresh session for a user, clearing any prior history."""
+
+    session = MenuSession(user_id=user_id)
+    _sessions[user_id] = session
     return session
 
 
@@ -129,6 +130,48 @@ async def _handle_option(option: dict, interaction: discord.Interaction) -> str:
     )
 
 
+def _mode_from_args(extra_args: List[str]) -> Optional[str]:
+    """Extract the value passed to a --mode flag from an argument list."""
+
+    for idx, arg in enumerate(extra_args):
+        if arg == "--mode" and idx + 1 < len(extra_args):
+            return extra_args[idx + 1]
+        if arg.startswith("--mode="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _load_endpoints(mode: str) -> List[dict]:
+    """Load endpoints CSV rows for a given mode, falling back to examples."""
+
+    api_mapping = {
+        "llm-ollama": DATA_DIR / "ollama.endpoints.csv",
+        "image-invokeai": DATA_DIR / "invoke.endpoints.csv",
+        "image-automatic1111": DATA_DIR / "automatic1111.endpoints.csv",
+    }
+    example_mapping = {
+        "llm-ollama": DATA_DIR / "ollama.endpoints.example.csv",
+        "image-invokeai": DATA_DIR / "invoke.endpoints.example.csv",
+        "image-automatic1111": DATA_DIR / "automatic1111.endpoints.example.csv",
+    }
+
+    path = api_mapping.get(mode)
+    fallback = example_mapping.get(mode)
+    csv_path = path if path and path.exists() else fallback
+    if not csv_path or not csv_path.exists():
+        return []
+
+    rows: List[dict] = []
+    try:
+        with csv_path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
 class ProviderSelect(discord.ui.Select):
     def __init__(self, top_key: str, session: MenuSession):
         options_config = PROVIDER_OPTIONS.get(top_key, [])
@@ -153,6 +196,17 @@ class ProviderSelect(discord.ui.Select):
         label = option.get("label", "Unknown option")
         self.session.log(f"{self.top_key} -> {label}")
 
+        if option.get("script") == "TerminalAI.py":
+            mode = _mode_from_args(option.get("extra_args", [])) or ""
+            endpoints = _load_endpoints(mode)
+            if endpoints:
+                view = EndpointSelect(label, endpoints, mode)
+                await interaction.response.send_message(
+                    f"Select a server for **{label}**:", view=view, ephemeral=True
+                )
+                await interaction.followup.send(self.session.history_message(), ephemeral=True)
+                return
+
         if not interaction.response.is_done():
             defer_kwargs = {"ephemeral": True}
             if option.get("script") == "shodanscan.py":
@@ -162,6 +216,46 @@ class ProviderSelect(discord.ui.Select):
         message = await _handle_option(option, interaction)
         await interaction.followup.send(message, ephemeral=True)
         await interaction.followup.send(self.session.history_message(), ephemeral=True)
+
+
+class EndpointSelect(discord.ui.Select):
+    def __init__(self, provider_label: str, endpoints: List[dict], mode: str):
+        options = []
+        for idx, endpoint in enumerate(endpoints):
+            label = endpoint.get("id") or endpoint.get("hostnames") or "Unnamed"
+            description = endpoint.get("org") or endpoint.get("isp") or ""
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(idx),
+                    description=description[:100] or None,
+                )
+            )
+            if len(options) >= 25:
+                break
+
+        placeholder = f"Select a {provider_label} server"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+        self.endpoints = endpoints
+        self.mode = mode
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        idx = int(self.values[0])
+        endpoint = self.endpoints[idx]
+
+        name = endpoint.get("id") or "Selected endpoint"
+        host = endpoint.get("ip") or endpoint.get("hostnames") or ""
+        port = endpoint.get("port") or ""
+        models = endpoint.get("available_models") or ""
+
+        details = f"{name}: {host}:{port}" if host or port else name
+        model_line = f"\nModels: {models}" if models else ""
+
+        await interaction.response.send_message(
+            f"{details}\nMode: `{self.mode}`{model_line}\n"
+            "This action is interactive in the terminal. Run it locally with the selected server.",
+            ephemeral=True,
+        )
 
 
 class TopMenuView(discord.ui.View):
@@ -222,7 +316,7 @@ bot = TerminalAIDiscord()
 
 @app_commands.command(name="terminalai", description="Open the TerminalAI menu in Discord")
 async def start_menu(interaction: discord.Interaction) -> None:
-    session = _get_session(interaction.user.id)
+    session = _reset_session(interaction.user.id)
     view = TopMenuView(session)
     await interaction.response.send_message(
         "Pick a menu to get started.", view=view, ephemeral=True
