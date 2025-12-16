@@ -78,7 +78,7 @@ An optional Discord bot mirrors the launcher menus with per-user, ephemeral inte
    python3 discord_bot.py
    ```
 
-The bot exposes a `/terminalai` command that opens the same menus you see in the launcher. Shodan scans run directly from Discord; interactive flows (including chat and image generation) provide the exact terminal command to execute locally.
+The bot exposes a `/terminalai` command that opens the same menus you see in the launcher. Use it to pick servers and models, then send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI). Shodan scans run directly from Discord.
 
 ### Shodan Scan
 

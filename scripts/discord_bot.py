@@ -34,7 +34,15 @@ from discord.ext import commands
 
 # Reuse the launcher menu configuration so Discord stays in sync.
 from launcher import PROVIDER_HEADERS, PROVIDER_OPTIONS, TOP_LEVEL_OPTIONS
-from invoke_client import InvokeAIClient, InvokeAIClientError
+from invoke_client import (
+    DEFAULT_CFG_SCALE,
+    DEFAULT_HEIGHT,
+    DEFAULT_STEPS,
+    DEFAULT_WIDTH,
+    InvokeAIClient,
+    InvokeAIClientError,
+    InvokeAIModel,
+)
 from TerminalAI import (
     TERMINALAI_BOARD_ID_ERROR_MESSAGE,
     TERMINALAI_BOARD_NAME,
@@ -84,6 +92,8 @@ def _compose_content(header: str, session: MenuSession, chat: Optional["ChatCont
     parts = [header]
     if chat:
         parts.append(chat.describe())
+        usage_hint = "/chat" if chat.mode.startswith("llm") else "/imagine"
+        parts.append(f"Use {usage_hint} to send prompts to the selected server.")
     parts.append(session.history_message())
     return "\n\n".join(part for part in parts if part)
 
@@ -111,6 +121,20 @@ class MenuSession:
 
 
 _sessions: Dict[int, MenuSession] = {}
+_active_contexts: Dict[int, Dict[str, ChatContext]] = {}
+
+
+def _get_session(user_id: int) -> MenuSession:
+    return _sessions.get(user_id) or _reset_session(user_id)
+
+
+def _save_context(user_id: int, chat: ChatContext) -> None:
+    _active_contexts.setdefault(user_id, {})[chat.mode] = chat
+
+
+def _get_context(user_id: int, mode: str) -> Optional[ChatContext]:
+    contexts = _active_contexts.get(user_id, {})
+    return contexts.get(mode)
 
 
 def _reset_session(user_id: int) -> MenuSession:
@@ -393,6 +417,93 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
     return f"Failed to chat with the server. {last_error or 'No supported endpoints responded.'}"
 
 
+def _resolve_invoke_model(client: InvokeAIClient, name: Optional[str]) -> Optional[InvokeAIModel]:
+    if not name:
+        return None
+    try:
+        models = client.list_models()
+    except InvokeAIClientError:
+        models = []
+    for model in models:
+        if getattr(model, "name", None) == name:
+            return model
+    return InvokeAIModel(name=name, base="", key=None, raw={"name": name})
+
+
+def _send_imagine_request(
+    chat: ChatContext,
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    cfg_scale: float,
+) -> str:
+    host = _first_value(chat.endpoint.get("ip") or chat.endpoint.get("hostnames"))
+    port = _first_value(chat.endpoint.get("port"))
+    if not host or not port:
+        return "Select an InvokeAI server with /terminalai before sending prompts."
+
+    sanitized_width = max(64, min(width, 2048))
+    sanitized_height = max(64, min(height, 2048))
+    sanitized_steps = max(1, min(steps, 150))
+    sanitized_cfg = max(0.0, min(cfg_scale, 30.0))
+
+    try:
+        client = InvokeAIClient(host, int(port), chat.endpoint.get("id") or host, DATA_DIR)
+    except (InvokeAIClientError, ValueError, TypeError) as exc:
+        return f"Unable to connect to InvokeAI: {exc}"
+
+    model = _resolve_invoke_model(client, chat.model)
+    if not model:
+        return "Select a model with /terminalai before sending image prompts."
+
+    try:
+        board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+    except InvokeAIClientError as exc:
+        return str(exc)
+    except requests.RequestException as exc:  # pragma: no cover - network failure
+        return f"Network error while preparing the board: {exc}"
+
+    if not _is_valid_terminalai_board_id(board_id):
+        return TERMINALAI_BOARD_ID_ERROR_MESSAGE
+
+    try:
+        submission = client.submit_image_generation(
+            model=model,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=sanitized_width,
+            height=sanitized_height,
+            steps=sanitized_steps,
+            cfg_scale=sanitized_cfg,
+            scheduler="",
+            board_name=TERMINALAI_BOARD_NAME,
+            board_id=board_id,
+        )
+    except InvokeAIClientError as exc:
+        return str(exc)
+    except requests.RequestException as exc:  # pragma: no cover - network failure
+        return f"Network error while submitting the prompt: {exc}"
+
+    queue_item = submission.get("queue_item_id") or submission.get("item_id")
+    batch_id = submission.get("batch_id") or submission.get("id")
+
+    lines = [
+        "Image prompt sent to InvokeAI.",
+        f"Model: {model.name}",
+        f"Resolution: {sanitized_width}x{sanitized_height}",
+    ]
+    if batch_id:
+        lines.append(f"Batch id: {batch_id}")
+    if queue_item:
+        lines.append(f"Queue item id: {queue_item}")
+    lines.append(
+        "Images will save to the TerminalAI board on the selected server."
+    )
+    return "\n".join(lines)
+
+
 def _trim_discord_message(content: str, limit: int = 1800) -> str:
     return content if len(content) <= limit else content[: limit - 1] + "…"
 
@@ -488,6 +599,7 @@ class EndpointSelect(discord.ui.Select):
         self.session.chat = chat
         self.session.log(f"{self.provider_label} -> {endpoint.get('id') or 'endpoint'}")
         self.session.endpoints = self.endpoints
+        _save_context(self.session.user_id, chat)
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -501,6 +613,7 @@ class EndpointSelect(discord.ui.Select):
             chat.available_models = fetched_models
             if chat.model not in fetched_models:
                 chat.model = fetched_models[0]
+            _save_context(self.session.user_id, chat)
             model_message = "Server selected. Pick a model and start chatting."
         elif chat.available_models:
             model_message = "Server selected. Using configured models for this server."
@@ -576,6 +689,7 @@ class ModelSelect(discord.ui.Select):
 
         chat.model = new_model
         self.session.log(f"Model -> {new_model}")
+        _save_context(self.session.user_id, chat)
         content = _compose_content(
             "Model selected. Send a prompt to chat.", self.session, chat
         )
@@ -609,6 +723,7 @@ class RefreshModelsButton(discord.ui.Button):
             chat.available_models = models
             if chat.model not in models:
                 chat.model = models[0]
+            _save_context(self.session.user_id, chat)
             message = "Model list refreshed from the server."
             self.session.log("Models refreshed")
         else:
@@ -656,65 +771,6 @@ class ChangeServerButton(discord.ui.Button):
         await _update_menu_message(interaction, content, view)
 
 
-class PromptModal(discord.ui.Modal):
-    def __init__(self, session: MenuSession):
-        super().__init__(title="Send a prompt")
-        self.session = session
-        self.prompt: discord.ui.TextInput = discord.ui.TextInput(
-            label="Prompt",
-            style=discord.TextStyle.long,
-            required=True,
-            max_length=800,
-            placeholder="Ask a question for the selected model",
-        )
-        self.add_item(self.prompt)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
-        chat = self.session.chat
-        if not chat or not chat.model:
-            content = _compose_content(
-                "Select a server and model before chatting.", self.session, chat
-            )
-            await _update_menu_message(interaction, content, ChatView(self.session))
-            return
-
-        prompt_text = str(self.prompt.value).strip()
-        if not prompt_text:
-            content = _compose_content("Prompt cannot be empty.", self.session, chat)
-            await _update_menu_message(interaction, content, ChatView(self.session))
-            return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        self.session.log(f"Prompt -> {chat.model}")
-        reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
-        header = f"You: {prompt_text}\nAssistant: {reply}"
-        content = _compose_content(_trim_discord_message(header), self.session, chat)
-        await interaction.edit_original_response(content=content, view=ChatView(self.session))
-
-
-class PromptButton(discord.ui.Button):
-    def __init__(self, session: MenuSession):
-        super().__init__(label="Send prompt", style=discord.ButtonStyle.primary)
-        self.session = session
-
-    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
-        chat = self.session.chat
-        if not chat:
-            content = _compose_content(
-                "Select a server before sending prompts.", self.session, None
-            )
-            await _update_menu_message(interaction, content, ChatView(self.session))
-            return
-        if not chat.model:
-            content = _compose_content(
-                "Choose a model before chatting.", self.session, chat
-            )
-            await _update_menu_message(interaction, content, ChatView(self.session))
-            return
-
-        await interaction.response.send_modal(PromptModal(self.session))
-
-
 class ChatView(discord.ui.View):
     def __init__(self, session: MenuSession):
         super().__init__(timeout=300)
@@ -723,8 +779,86 @@ class ChatView(discord.ui.View):
         if session.chat:
             self.add_item(ModelSelect(session))
         self.add_item(RefreshModelsButton(session))
-        self.add_item(PromptButton(session))
         self.add_item(ChangeServerButton(session))
+
+
+@app_commands.command(name="chat", description="Send a prompt to your selected Ollama server")
+@app_commands.describe(prompt="Question or instruction for the active model")
+async def chat_command(interaction: discord.Interaction, prompt: str) -> None:
+    prompt_text = prompt.strip()
+    if not prompt_text:
+        await interaction.response.send_message(
+            "Prompt cannot be empty.", ephemeral=True
+        )
+        return
+
+    session = _get_session(interaction.user.id)
+    chat = _get_context(interaction.user.id, "llm-ollama")
+    if not chat or not chat.model:
+        await interaction.response.send_message(
+            "Select a chat server and model with /terminalai first.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    session.log(f"Chat prompt -> {chat.model}")
+    reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
+    _save_context(interaction.user.id, chat)
+    header = f"You: {prompt_text}\nAssistant: {reply}"
+    content = _compose_content(_trim_discord_message(header), session, chat)
+    await interaction.edit_original_response(content=content)
+
+
+@app_commands.command(name="imagine", description="Generate an image with your selected InvokeAI server")
+@app_commands.describe(
+    prompt="Image prompt to submit",
+    negative_prompt="What to avoid in the image",
+    width="Target width (64-2048)",
+    height="Target height (64-2048)",
+    steps="Sampling steps",
+    cfg_scale="CFG scale",
+)
+async def imagine_command(
+    interaction: discord.Interaction,
+    prompt: str,
+    negative_prompt: str = "",
+    width: int = DEFAULT_WIDTH,
+    height: int = DEFAULT_HEIGHT,
+    steps: int = DEFAULT_STEPS,
+    cfg_scale: float = DEFAULT_CFG_SCALE,
+) -> None:
+    prompt_text = prompt.strip()
+    if not prompt_text:
+        await interaction.response.send_message(
+            "Prompt cannot be empty.", ephemeral=True
+        )
+        return
+
+    session = _get_session(interaction.user.id)
+    chat = _get_context(interaction.user.id, "image-invokeai")
+    if not chat or not chat.model:
+        await interaction.response.send_message(
+            "Select an InvokeAI server and model with /terminalai before calling /imagine.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    session.log(f"Imagine prompt -> {chat.model}")
+    result = await asyncio.to_thread(
+        _send_imagine_request,
+        chat,
+        prompt_text,
+        negative_prompt,
+        width,
+        height,
+        steps,
+        cfg_scale,
+    )
+    _save_context(interaction.user.id, chat)
+    content = _compose_content(_trim_discord_message(result), session, chat)
+    await interaction.edit_original_response(content=content)
 
 
 class TopMenuView(discord.ui.View):
@@ -779,6 +913,8 @@ class TerminalAIDiscord(commands.Bot):
 
     async def setup_hook(self) -> None:
         self.tree.add_command(start_menu)
+        self.tree.add_command(chat_command)
+        self.tree.add_command(imagine_command)
         await self.tree.sync()
 
 
