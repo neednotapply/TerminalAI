@@ -95,7 +95,8 @@ def _compose_content(header: str, session: MenuSession, chat: Optional["ChatCont
         usage_hint = "/chat" if chat.mode.startswith("llm") else "/imagine"
         parts.append(f"Use {usage_hint} to send prompts to the selected server.")
     parts.append(session.history_message())
-    return "\n\n".join(part for part in parts if part)
+    content = "\n\n".join(part for part in parts if part)
+    return _trim_discord_message(content)
 
 
 @dataclass
@@ -122,6 +123,7 @@ class MenuSession:
 
 _sessions: Dict[int, MenuSession] = {}
 _active_contexts: Dict[int, Dict[str, ChatContext]] = {}
+_MAX_CHAT_HISTORY = 10
 
 
 def _get_session(user_id: int) -> MenuSession:
@@ -389,9 +391,10 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
         return "The selected server is missing connection details."
 
     chat_paths = ["/v1/chat/completions", "/api/chat", "/chat"]
+    pending_message = {"role": "user", "content": prompt}
     payload = {
         "model": chat.model,
-        "messages": chat.messages + [{"role": "user", "content": prompt}],
+        "messages": (chat.messages + [pending_message])[-_MAX_CHAT_HISTORY :],
         "stream": False,
     }
 
@@ -407,8 +410,10 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
             if not content:
                 last_error = "Server returned an empty response."
                 continue
-            chat.messages.append({"role": "user", "content": prompt})
+            chat.messages.append(pending_message)
             chat.messages.append({"role": "assistant", "content": content})
+            if len(chat.messages) > _MAX_CHAT_HISTORY:
+                chat.messages = chat.messages[-_MAX_CHAT_HISTORY :]
             return content
         except requests.RequestException as exc:  # pragma: no cover - network failures
             last_error = str(exc)
@@ -787,27 +792,24 @@ class ChatView(discord.ui.View):
 async def chat_command(interaction: discord.Interaction, prompt: str) -> None:
     prompt_text = prompt.strip()
     if not prompt_text:
-        await interaction.response.send_message(
-            "Prompt cannot be empty.", ephemeral=True
-        )
+        await interaction.response.send_message("Prompt cannot be empty.")
         return
 
     session = _get_session(interaction.user.id)
     chat = _get_context(interaction.user.id, "llm-ollama")
     if not chat or not chat.model:
         await interaction.response.send_message(
-            "Select a chat server and model with /terminalai first.",
-            ephemeral=True,
+            "Select a chat server and model with /terminalai first."
         )
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
     session.log(f"Chat prompt -> {chat.model}")
     reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
     _save_context(interaction.user.id, chat)
-    header = f"You: {prompt_text}\nAssistant: {reply}"
-    content = _compose_content(_trim_discord_message(header), session, chat)
-    await interaction.edit_original_response(content=content)
+    quoted_prompt = "\n".join(f"> {line}" if line else ">" for line in prompt_text.splitlines())
+    body = f"**Question**\n{quoted_prompt}\n\n**Response**\n{reply}"
+    await interaction.edit_original_response(content=_trim_discord_message(body))
 
 
 @app_commands.command(name="imagine", description="Generate an image with your selected InvokeAI server")
@@ -830,21 +832,18 @@ async def imagine_command(
 ) -> None:
     prompt_text = prompt.strip()
     if not prompt_text:
-        await interaction.response.send_message(
-            "Prompt cannot be empty.", ephemeral=True
-        )
+        await interaction.response.send_message("Prompt cannot be empty.")
         return
 
     session = _get_session(interaction.user.id)
     chat = _get_context(interaction.user.id, "image-invokeai")
     if not chat or not chat.model:
         await interaction.response.send_message(
-            "Select an InvokeAI server and model with /terminalai before calling /imagine.",
-            ephemeral=True,
+            "Select an InvokeAI server and model with /terminalai before calling /imagine."
         )
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
     session.log(f"Imagine prompt -> {chat.model}")
     result = await asyncio.to_thread(
         _send_imagine_request,
