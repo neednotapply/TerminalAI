@@ -37,6 +37,7 @@ from launcher import PROVIDER_HEADERS, PROVIDER_OPTIONS, TOP_LEVEL_OPTIONS
 from invoke_client import (
     DEFAULT_CFG_SCALE,
     DEFAULT_HEIGHT,
+    DEFAULT_SCHEDULER,
     DEFAULT_STEPS,
     DEFAULT_WIDTH,
     InvokeAIClient,
@@ -53,6 +54,7 @@ from TerminalAI import (
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
+SESSIONS_PATH = DATA_DIR / "discord_sessions.json"
 
 
 def _load_config() -> dict:
@@ -113,6 +115,7 @@ class MenuSession:
 
     def log(self, entry: str) -> None:
         self.history.append(entry)
+        _persist_session(self)
 
     def history_message(self) -> str:
         if not self.history:
@@ -126,21 +129,112 @@ _active_contexts: Dict[int, Dict[str, ChatContext]] = {}
 _MAX_CHAT_HISTORY = 10
 
 
+def _load_persisted_state() -> dict:
+    if not SESSIONS_PATH.exists():
+        return {"contexts": {}, "sessions": {}}
+    try:
+        with SESSIONS_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            return {
+                "contexts": data.get("contexts", {}),
+                "sessions": data.get("sessions", {}),
+            }
+    except (OSError, json.JSONDecodeError):
+        return {"contexts": {}, "sessions": {}}
+
+
+_persisted_state = _load_persisted_state()
+
+
 def _get_session(user_id: int) -> MenuSession:
-    return _sessions.get(user_id) or _reset_session(user_id)
+    if user_id in _sessions:
+        return _sessions[user_id]
+
+    persisted = _persisted_state.get("sessions", {}).get(str(user_id), {})
+    if persisted:
+        session = MenuSession(
+            user_id=user_id,
+            history=persisted.get("history", []),
+            top_key=persisted.get("top_key"),
+            mode=persisted.get("mode"),
+            endpoints=persisted.get("endpoints", []),
+            provider_label=persisted.get("provider_label"),
+        )
+        _sessions[user_id] = session
+        return session
+
+    return _reset_session(user_id)
 
 
 def _save_context(user_id: int, chat: ChatContext) -> None:
     _active_contexts.setdefault(user_id, {})[chat.mode] = chat
+    _persisted_state.setdefault("contexts", {}).setdefault(str(user_id), {})[chat.mode] = {
+        "endpoint": chat.endpoint,
+        "mode": chat.mode,
+        "model": chat.model,
+        "messages": chat.messages,
+        "available_models": chat.available_models,
+    }
+    SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with SESSIONS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(_persisted_state, handle)
+    except OSError:
+        pass
+
+
+def _persist_session(session: MenuSession) -> None:
+    _persisted_state.setdefault("sessions", {})[str(session.user_id)] = {
+        "history": session.history,
+        "top_key": session.top_key,
+        "mode": session.mode,
+        "endpoints": session.endpoints,
+        "provider_label": session.provider_label,
+    }
+    SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with SESSIONS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(_persisted_state, handle)
+    except OSError:
+        pass
 
 
 def _get_context(user_id: int, mode: str) -> Optional[ChatContext]:
     contexts = _active_contexts.get(user_id, {})
-    return contexts.get(mode)
+    if mode in contexts:
+        return contexts.get(mode)
+
+    persisted = _persisted_state.get("contexts", {}).get(str(user_id), {})
+    saved = persisted.get(mode)
+    if not saved:
+        return None
+
+    chat = ChatContext(
+        endpoint=saved.get("endpoint", {}),
+        mode=saved.get("mode", mode),
+        model=saved.get("model"),
+        messages=saved.get("messages", []),
+        available_models=saved.get("available_models", []),
+    )
+
+    if not _context_is_available(chat):
+        return None
+
+    _save_context(user_id, chat)
+    return chat
 
 
 def _reset_session(user_id: int) -> MenuSession:
     """Create a fresh session for a user, clearing any prior history."""
+
+    _active_contexts.pop(user_id, None)
+    _persisted_state.get("contexts", {}).pop(str(user_id), None)
+    _persisted_state.get("sessions", {}).pop(str(user_id), None)
+    try:
+        with SESSIONS_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(_persisted_state, handle)
+    except OSError:
+        pass
 
     session = MenuSession(user_id=user_id)
     _sessions[user_id] = session
@@ -295,6 +389,29 @@ def _load_endpoints(mode: str) -> List[dict]:
     except OSError:
         return []
     return rows
+
+
+def _context_is_available(chat: ChatContext) -> bool:
+    if not chat.endpoint:
+        return False
+
+    host = _first_value(chat.endpoint.get("ip") or chat.endpoint.get("hostnames"))
+    port = _first_value(chat.endpoint.get("port"))
+    if not host or not port:
+        return False
+
+    endpoints = _load_endpoints(chat.mode)
+    if not endpoints:
+        return True
+
+    def _matches(endpoint: dict) -> bool:
+        if endpoint.get("id") and chat.endpoint.get("id"):
+            return endpoint.get("id") == chat.endpoint.get("id")
+        ep_host = _first_value(endpoint.get("ip") or endpoint.get("hostnames"))
+        ep_port = _first_value(endpoint.get("port"))
+        return ep_host == host and ep_port == port
+
+    return any(_matches(endpoint) for endpoint in endpoints)
 
 
 def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
@@ -462,6 +579,7 @@ def _send_imagine_request(
     sanitized_height = max(64, min(height, 2048))
     sanitized_steps = max(1, min(steps, 150))
     sanitized_cfg = max(0.0, min(cfg_scale, 30.0))
+    scheduler = DEFAULT_SCHEDULER
 
     try:
         client = InvokeAIClient(host, int(port), chat.endpoint.get("id") or host, DATA_DIR)
@@ -491,7 +609,7 @@ def _send_imagine_request(
             height=sanitized_height,
             steps=sanitized_steps,
             cfg_scale=sanitized_cfg,
-            scheduler="",
+            scheduler=scheduler,
             board_name=TERMINALAI_BOARD_NAME,
             board_id=board_id,
         )
