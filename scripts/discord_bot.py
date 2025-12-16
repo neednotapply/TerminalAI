@@ -443,7 +443,9 @@ class ModelSelect(discord.ui.Select):
         chat = session.chat
         options = []
         if chat:
-            for model in chat.available_models:
+            models = chat.available_models
+            more_count = max(0, len(models) - 25)
+            for model in models[:25]:
                 options.append(
                     discord.SelectOption(
                         label=model[:100],
@@ -451,11 +453,18 @@ class ModelSelect(discord.ui.Select):
                         default=bool(chat.model and chat.model == model),
                     )
                 )
+            placeholder = (
+                "Pick a model (showing first 25)"
+                if more_count
+                else "Pick a model"
+            )
+        else:
+            placeholder = "Pick a model"
         if not options:
             options.append(discord.SelectOption(label="No models available", value=""))
 
         super().__init__(
-            placeholder="Pick a model",
+            placeholder=placeholder,
             options=options,
             min_values=1,
             max_values=1,
