@@ -1,3 +1,5 @@
 {
-  "SHODAN_API_KEY": "your_shodan_api_key"
+  "SHODAN_API_KEY": "your_shodan_api_key",
+  "DISCORD_BOT_TOKEN": "your_discord_bot_token",
+  "TERMINALAI_WORKING_DIR": "optional_path_for_menu_scripts"
 }
