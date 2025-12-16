@@ -7,6 +7,9 @@ user receives a private menu and history of the options they select.
 Environment variables:
 - DISCORD_BOT_TOKEN: required Discord bot token.
 
+Permissions:
+- Enable the **Message Content Intent** for the bot in the Discord developer portal.
+
 The bot is intentionally light-weight and only runs actions that are
 non-interactive inside Discord (for example Shodan scans). Interactive
 flows such as the TUI chat client are presented with the command that
@@ -303,6 +306,7 @@ class TopMenuView(discord.ui.View):
 class TerminalAIDiscord(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self) -> None:
