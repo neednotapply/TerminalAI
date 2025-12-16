@@ -200,7 +200,8 @@ class ProviderSelect(discord.ui.Select):
             mode = _mode_from_args(option.get("extra_args", [])) or ""
             endpoints = _load_endpoints(mode)
             if endpoints:
-                view = EndpointSelect(label, endpoints, mode)
+                view = discord.ui.View(timeout=300)
+                view.add_item(EndpointSelect(label, endpoints, mode))
                 await interaction.response.send_message(
                     f"Select a server for **{label}**:", view=view, ephemeral=True
                 )
