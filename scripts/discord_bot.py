@@ -22,6 +22,7 @@ import csv
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -45,6 +46,7 @@ from invoke_client import (
     InvokeAIModel,
 )
 from TerminalAI import (
+    REQUEST_TIMEOUT,
     TERMINALAI_BOARD_ID_ERROR_MESSAGE,
     TERMINALAI_BOARD_NAME,
     _normalize_board_id,
@@ -127,6 +129,7 @@ class MenuSession:
 _sessions: Dict[int, MenuSession] = {}
 _active_contexts: Dict[int, Dict[str, ChatContext]] = {}
 _MAX_CHAT_HISTORY = 10
+_CHAT_MEMORY_SECONDS = 180
 
 
 def _load_persisted_state() -> dict:
@@ -167,6 +170,7 @@ def _get_session(user_id: int) -> MenuSession:
 
 
 def _save_context(user_id: int, chat: ChatContext) -> None:
+    _prune_chat_messages(chat)
     _active_contexts.setdefault(user_id, {})[chat.mode] = chat
     _persisted_state.setdefault("contexts", {}).setdefault(str(user_id), {})[chat.mode] = {
         "endpoint": chat.endpoint,
@@ -220,8 +224,25 @@ def _get_context(user_id: int, mode: str) -> Optional[ChatContext]:
     if not _context_is_available(chat):
         return None
 
+    _prune_chat_messages(chat)
     _save_context(user_id, chat)
     return chat
+
+
+def _prune_chat_messages(chat: "ChatContext") -> None:
+    """Limit chat history to recent messages within the retention window."""
+
+    now = time.time()
+    cutoff = now - _CHAT_MEMORY_SECONDS
+    pruned: List[dict] = []
+    for message in chat.messages:
+        timestamp = message.get("timestamp")
+        if timestamp is None:
+            timestamp = now
+            message["timestamp"] = timestamp
+        if timestamp >= cutoff:
+            pruned.append(message)
+    chat.messages = pruned[-_MAX_CHAT_HISTORY :]
 
 
 def _reset_session(user_id: int) -> MenuSession:
@@ -517,17 +538,26 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
         return "The selected server is missing connection details."
 
     chat_paths = ["/v1/chat/completions", "/api/chat", "/chat"]
-    pending_message = {"role": "user", "content": prompt}
-    payload = {
-        "model": chat.model,
-        "messages": (chat.messages + [pending_message])[-_MAX_CHAT_HISTORY :],
-        "stream": False,
-    }
+    _prune_chat_messages(chat)
+    now = time.time()
+    pending_message = {"role": "user", "content": prompt, "timestamp": now}
+    request_timeout = REQUEST_TIMEOUT
+    read_timeout = REQUEST_TIMEOUT * (max(1, len(chat.messages) // 2 + 1))
+    payload_messages = []
+    for message in (chat.messages + [pending_message])[-_MAX_CHAT_HISTORY :]:
+        payload_messages.append(
+            {"role": message.get("role"), "content": message.get("content")}
+        )
+    payload = {"model": chat.model, "messages": payload_messages, "stream": False}
 
     last_error = ""
     for path in chat_paths:
         try:
-            resp = requests.post(f"{base_url}{path}", json=payload, timeout=30)
+            resp = requests.post(
+                f"{base_url}{path}",
+                json=payload,
+                timeout=(request_timeout, read_timeout),
+            )
             if resp.status_code == 404:
                 continue
             resp.raise_for_status()
@@ -537,9 +567,10 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
                 last_error = "Server returned an empty response."
                 continue
             chat.messages.append(pending_message)
-            chat.messages.append({"role": "assistant", "content": content})
-            if len(chat.messages) > _MAX_CHAT_HISTORY:
-                chat.messages = chat.messages[-_MAX_CHAT_HISTORY :]
+            chat.messages.append(
+                {"role": "assistant", "content": content, "timestamp": time.time()}
+            )
+            _prune_chat_messages(chat)
             return content
         except requests.RequestException as exc:  # pragma: no cover - network failures
             last_error = str(exc)
