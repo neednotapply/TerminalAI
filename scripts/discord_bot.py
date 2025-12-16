@@ -117,7 +117,6 @@ async def _handle_option(option: dict, interaction: discord.Interaction) -> str:
         return "Selected option has no linked action."
 
     if script == "shodanscan.py":
-        await interaction.response.defer(thinking=True, ephemeral=True)
         return await _run_shodan_scan(option, interaction)
 
     script_path = _working_directory() / script
@@ -153,6 +152,12 @@ class ProviderSelect(discord.ui.Select):
         option = provider_options[idx]
         label = option.get("label", "Unknown option")
         self.session.log(f"{self.top_key} -> {label}")
+
+        if not interaction.response.is_done():
+            defer_kwargs = {"ephemeral": True}
+            if option.get("script") == "shodanscan.py":
+                defer_kwargs["thinking"] = True
+            await interaction.response.defer(**defer_kwargs)
 
         message = await _handle_option(option, interaction)
         await interaction.followup.send(message, ephemeral=True)
