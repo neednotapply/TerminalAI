@@ -21,6 +21,7 @@ import asyncio
 import csv
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -101,6 +102,21 @@ def _compose_content(header: str, session: MenuSession, chat: Optional["ChatCont
     parts.append(session.history_message())
     content = "\n\n".join(part for part in parts if part)
     return _trim_discord_message(content)
+
+
+def _format_prompt_quote(prompt_text: str) -> str:
+    return "\n".join(f"> {line}" if line else ">" for line in prompt_text.splitlines())
+
+
+def _strip_bot_mention(content: str, bot_id: int, bot_name: str) -> str:
+    mention_patterns = [rf"<@!?{bot_id}>"]
+    if bot_name:
+        mention_patterns.append(rf"@{re.escape(bot_name)}")
+
+    cleaned = content
+    for pattern in mention_patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE).strip()
+    return cleaned
 
 
 @dataclass
@@ -957,7 +973,7 @@ async def chat_command(interaction: discord.Interaction, prompt: str) -> None:
     session.log(f"Chat prompt -> {chat.model}")
     reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
     _save_context(interaction.user.id, chat)
-    quoted_prompt = "\n".join(f"> {line}" if line else ">" for line in prompt_text.splitlines())
+    quoted_prompt = _format_prompt_quote(prompt_text)
     body = f"**Question**\n{quoted_prompt}\n\n**Response**\n{reply}"
     await interaction.edit_original_response(content=_trim_discord_message(body))
 
@@ -1021,6 +1037,33 @@ async def imagine_command(
     )
 
 
+async def _reply_to_mention(
+    message: discord.Message, bot_user: discord.abc.User
+) -> None:
+    prompt_text = _strip_bot_mention(
+        message.content, bot_user.id, bot_user.display_name or bot_user.name
+    )
+    if not prompt_text:
+        return
+
+    session = _get_session(message.author.id)
+    chat = _get_context(message.author.id, "llm-ollama")
+    if not chat or not chat.model:
+        await message.reply(
+            "Select a chat server and model with /terminalai first.",
+            mention_author=False,
+        )
+        return
+
+    async with message.channel.typing():
+        session.log(f"Chat prompt -> {chat.model}")
+        reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
+        _save_context(message.author.id, chat)
+        quoted_prompt = _format_prompt_quote(prompt_text)
+        body = f"**Question**\n{quoted_prompt}\n\n**Response**\n{reply}"
+        await message.reply(_trim_discord_message(body), mention_author=False)
+
+
 class TopMenuView(discord.ui.View):
     def __init__(self, session: MenuSession):
         super().__init__(timeout=300)
@@ -1076,6 +1119,15 @@ class TerminalAIDiscord(commands.Bot):
         self.tree.add_command(chat_command)
         self.tree.add_command(imagine_command)
         await self.tree.sync()
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+
+        if self.user and any(mention.id == self.user.id for mention in message.mentions):
+            await _reply_to_mention(message, self.user)
+
+        await super().on_message(message)
 
 
 bot = TerminalAIDiscord()
