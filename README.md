@@ -78,11 +78,13 @@ An optional Discord bot mirrors the launcher menus with per-user, ephemeral inte
    python3 discord_bot.py
    ```
 
-The bot exposes a `/terminalai` command that opens the same menus you see in the launcher. Use it to pick servers and models, then send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI). Shodan scans run directly from Discord.
+The bot exposes a `/terminalai` command that opens the same menus you see in the launcher. Use it to pick servers and models, then send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI). Shodan scans run directly from Discord and now offer a single option that checks all supported server types.
+
+Your most recent Discord server and model selections are saved to `data/discord_preferences.json`. The bot loads these preferences on startup so you can use `/chat` or `/imagine` immediately after a restart. Run `/terminalai` again if you need to change the server or your preferred host is unavailable.
 
 ### Shodan Scan
 
-Scan for new Ollama and InvokeAI servers and verify existing ones:
+Scan for new supported servers and verify existing ones:
 
 ```bash
 python3 scripts/shodanscan.py [--debug] [--limit N] [--existing-limit N]
@@ -106,6 +108,7 @@ python3 -m py_compile scripts/*.py
 - `data/conversations/` – per-model conversation history.
 - `data/logs/` – saved transcripts.
 - `data/config.json` – optional configuration (`SHODAN_API_KEY`).
+- `data/discord_preferences.json` – persisted Discord server and model choices.
 
 ## License
 

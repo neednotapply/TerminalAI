@@ -21,54 +21,44 @@ HEADER_LINES = [
 ]
 
 TOP_LEVEL_OPTIONS = [
-    {"label": "LLM Chat", "key": "llm"},
-    {"label": "Image Generation", "key": "image"},
+    {"label": "Setup /Chat", "key": "chat"},
+    {"label": "Setup /Imagine", "key": "imagine"},
+    {"label": "Shodan Scan", "key": "shodan"},
     {"label": "[Exit]", "key": "exit"},
 ]
 
 PROVIDER_OPTIONS = {
-    "llm": [
+    "chat": [
         {
             "label": "Ollama Servers",
             "script": "TerminalAI.py",
             "extra_args": ["--mode", "llm-ollama"],
             "clear_before": False,
         },
-        {
-            "label": "Ollama Shodan Scan",
-            "script": "shodanscan.py",
-            "extra_args": ["--api-type", "ollama"],
-        },
         {"label": "[Back]", "key": "back"},
     ],
-    "image": [
+    "imagine": [
         {
             "label": "InvokeAI Servers",
             "script": "TerminalAI.py",
             "extra_args": ["--mode", "image-invokeai"],
         },
+        {"label": "[Back]", "key": "back"},
+    ],
+    "shodan": [
         {
-            "label": "InvokeAI Shodan Scan",
+            "label": "Scan all servers",
             "script": "shodanscan.py",
-            "extra_args": ["--api-type", "invokeai"],
-        },
-        {
-            "label": "Automatic1111 Servers",
-            "script": "TerminalAI.py",
-            "extra_args": ["--mode", "image-automatic1111"],
-        },
-        {
-            "label": "Automatic1111 Shodan Scan",
-            "script": "shodanscan.py",
-            "extra_args": ["--api-type", "automatic1111"],
+            "extra_args": [],
         },
         {"label": "[Back]", "key": "back"},
     ],
 }
 
 PROVIDER_HEADERS = {
-    "llm": "Select LLM Action:",
-    "image": "Select Image Generation Action:",
+    "chat": "Select a chat setup action:",
+    "imagine": "Select an imagine setup action:",
+    "shodan": "Run a Shodan scan:",
 }
 
 OPTIONS = [opt["label"] for opt in TOP_LEVEL_OPTIONS]
