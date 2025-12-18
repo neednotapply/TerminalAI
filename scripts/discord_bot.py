@@ -58,6 +58,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CONFIG_PATH = DATA_DIR / "config.json"
 SESSIONS_PATH = DATA_DIR / "discord_sessions.json"
+PREFERENCES_PATH = DATA_DIR / "discord_preferences.json"
 
 
 def _load_config() -> dict:
@@ -71,6 +72,26 @@ def _load_config() -> dict:
 
 
 CONFIG = _load_config()
+
+
+def _load_preferences() -> dict:
+    if not PREFERENCES_PATH.exists():
+        return {}
+    try:
+        with PREFERENCES_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_preferences() -> None:
+    PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with PREFERENCES_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(_preferences, handle)
+    except OSError:
+        pass
 
 
 def _working_directory() -> Path:
@@ -163,6 +184,7 @@ def _load_persisted_state() -> dict:
 
 
 _persisted_state = _load_persisted_state()
+_preferences = _load_preferences()
 
 
 def _get_session(user_id: int) -> MenuSession:
@@ -195,6 +217,7 @@ def _save_context(user_id: int, chat: ChatContext) -> None:
         "messages": chat.messages,
         "available_models": chat.available_models,
     }
+    _update_preferences_from_chat(chat)
     SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         with SESSIONS_PATH.open("w", encoding="utf-8") as handle:
@@ -219,14 +242,49 @@ def _persist_session(session: MenuSession) -> None:
         pass
 
 
+def _load_preferred_context(mode: str) -> Optional[ChatContext]:
+    if not mode:
+        return None
+
+    preferred = _preferences.get(mode, {})
+    if not isinstance(preferred, dict):
+        return None
+
+    endpoint = preferred.get("endpoint", {})
+    if not isinstance(endpoint, dict) or not endpoint:
+        return None
+
+    available_models = preferred.get("available_models", [])
+    if isinstance(available_models, str):
+        available_models = _parse_models(available_models)
+    elif not isinstance(available_models, list):
+        available_models = []
+
+    chat = ChatContext(
+        endpoint=endpoint,
+        mode=mode,
+        model=preferred.get("model"),
+        available_models=available_models,
+    )
+    return chat if _context_is_available(chat) else None
+
+
 def _get_context(user_id: int, mode: str) -> Optional[ChatContext]:
     contexts = _active_contexts.get(user_id, {})
     if mode in contexts:
-        return contexts.get(mode)
+        context = contexts.get(mode)
+        if context and _context_is_available(context):
+            return context
+        contexts.pop(mode, None)
 
     persisted = _persisted_state.get("contexts", {}).get(str(user_id), {})
     saved = persisted.get(mode)
     if not saved:
+        preferred = _load_preferred_context(mode)
+        if preferred:
+            _active_contexts.setdefault(user_id, {})[mode] = preferred
+            _save_context(user_id, preferred)
+            return preferred
         return None
 
     chat = ChatContext(
@@ -238,6 +296,11 @@ def _get_context(user_id: int, mode: str) -> Optional[ChatContext]:
     )
 
     if not _context_is_available(chat):
+        preferred = _load_preferred_context(mode)
+        if preferred:
+            _active_contexts.setdefault(user_id, {})[mode] = preferred
+            _save_context(user_id, preferred)
+            return preferred
         return None
 
     _prune_chat_messages(chat)
@@ -259,6 +322,25 @@ def _prune_chat_messages(chat: "ChatContext") -> None:
         if timestamp >= cutoff:
             pruned.append(message)
     chat.messages = pruned[-_MAX_CHAT_HISTORY :]
+
+
+def _update_preferences_from_chat(chat: "ChatContext") -> None:
+    if not chat or not chat.endpoint:
+        return
+
+    mode = getattr(chat, "mode", "") or ""
+    if not mode:
+        return
+
+    preferred = {
+        "endpoint": chat.endpoint,
+        "available_models": chat.available_models,
+    }
+    if chat.model:
+        preferred["model"] = chat.model
+
+    _preferences[mode] = preferred
+    _save_preferences()
 
 
 def _reset_session(user_id: int) -> MenuSession:
@@ -771,6 +853,7 @@ class EndpointSelect(discord.ui.Select):
         self.session.log(f"{self.provider_label} -> {endpoint.get('id') or 'endpoint'}")
         self.session.endpoints = self.endpoints
         _save_context(self.session.user_id, chat)
+        _update_preferences_from_chat(chat)
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -861,6 +944,7 @@ class ModelSelect(discord.ui.Select):
         chat.model = new_model
         self.session.log(f"Model -> {new_model}")
         _save_context(self.session.user_id, chat)
+        _update_preferences_from_chat(chat)
         content = _compose_content(
             "Model selected. Send a prompt to chat.", self.session, chat
         )
@@ -895,6 +979,7 @@ class RefreshModelsButton(discord.ui.Button):
             if chat.model not in models:
                 chat.model = models[0]
             _save_context(self.session.user_id, chat)
+            _update_preferences_from_chat(chat)
             message = "Model list refreshed from the server."
             self.session.log("Models refreshed")
         else:
@@ -1085,8 +1170,9 @@ class TopMenuView(discord.ui.View):
 
     async def on_select(self, interaction: discord.Interaction) -> None:
         key = self.menu.values[0]
+        label = next((item.get("label") for item in TOP_LEVEL_OPTIONS if item.get("key") == key), key)
         self.session.top_key = key
-        self.session.log(f"Selected top-level menu: {key}")
+        self.session.log(f"Selected top-level menu: {label}")
 
         if key == "exit":
             await _update_menu_message(
@@ -1096,14 +1182,16 @@ class TopMenuView(discord.ui.View):
 
         if key not in PROVIDER_OPTIONS:
             await _update_menu_message(
-                interaction, _compose_content("That menu isn't available yet.", self.session), self
+                interaction,
+                _compose_content("That menu isn't available yet.", self.session),
+                self,
             )
             return
 
         view = discord.ui.View(timeout=300)
         view.add_item(ProviderSelect(key, self.session))
         content = _compose_content(
-            f"You picked **{key}**. Choose an action below:", self.session
+            f"You picked **{label}**. Choose an action below:", self.session
         )
         await _update_menu_message(interaction, content, view)
 
