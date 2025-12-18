@@ -600,11 +600,11 @@ def _send_imagine_request(
     height: int,
     steps: int,
     cfg_scale: float,
-) -> str:
+) -> tuple[Optional[str], Optional[Path]]:
     host = _first_value(chat.endpoint.get("ip") or chat.endpoint.get("hostnames"))
     port = _first_value(chat.endpoint.get("port"))
     if not host or not port:
-        return "Select an InvokeAI server with /terminalai before sending prompts."
+        return "Select an InvokeAI server with /terminalai before sending prompts.", None
 
     sanitized_width = max(64, min(width, 2048))
     sanitized_height = max(64, min(height, 2048))
@@ -615,24 +615,23 @@ def _send_imagine_request(
     try:
         client = InvokeAIClient(host, int(port), chat.endpoint.get("id") or host, DATA_DIR)
     except (InvokeAIClientError, ValueError, TypeError) as exc:
-        return f"Unable to connect to InvokeAI: {exc}"
+        return f"Unable to connect to InvokeAI: {exc}", None
 
     model = _resolve_invoke_model(client, chat.model)
     if not model:
-        return "Select a model with /terminalai before sending image prompts."
+        return "Select a model with /terminalai before sending image prompts.", None
 
     try:
         board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
     except InvokeAIClientError as exc:
-        return str(exc)
+        return str(exc), None
     except requests.RequestException as exc:  # pragma: no cover - network failure
-        return f"Network error while preparing the board: {exc}"
+        return f"Network error while preparing the board: {exc}", None
 
     if not _is_valid_terminalai_board_id(board_id):
-        return TERMINALAI_BOARD_ID_ERROR_MESSAGE
-
+        return TERMINALAI_BOARD_ID_ERROR_MESSAGE, None
     try:
-        submission = client.submit_image_generation(
+        result = client.generate_image(
             model=model,
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -642,29 +641,17 @@ def _send_imagine_request(
             cfg_scale=sanitized_cfg,
             scheduler=scheduler,
             board_name=TERMINALAI_BOARD_NAME,
-            board_id=board_id,
         )
     except InvokeAIClientError as exc:
-        return str(exc)
+        return str(exc), None
     except requests.RequestException as exc:  # pragma: no cover - network failure
-        return f"Network error while submitting the prompt: {exc}"
+        return f"Network error while generating the image: {exc}", None
 
-    queue_item = submission.get("queue_item_id") or submission.get("item_id")
-    batch_id = submission.get("batch_id") or submission.get("id")
+    image_path = result.get("path") if isinstance(result, dict) else None
+    if not image_path:
+        return "InvokeAI did not return an image file.", None
 
-    lines = [
-        "Image prompt sent to InvokeAI.",
-        f"Model: {model.name}",
-        f"Resolution: {sanitized_width}x{sanitized_height}",
-    ]
-    if batch_id:
-        lines.append(f"Batch id: {batch_id}")
-    if queue_item:
-        lines.append(f"Queue item id: {queue_item}")
-    lines.append(
-        "Images will save to the TerminalAI board on the selected server."
-    )
-    return "\n".join(lines)
+    return None, image_path
 
 
 def _trim_discord_message(content: str, limit: int = 1800) -> str:
@@ -1003,7 +990,7 @@ async def imagine_command(
 
     await interaction.response.defer(thinking=True)
     session.log(f"Imagine prompt -> {chat.model}")
-    result = await asyncio.to_thread(
+    message, image_path = await asyncio.to_thread(
         _send_imagine_request,
         chat,
         prompt_text,
@@ -1014,8 +1001,17 @@ async def imagine_command(
         cfg_scale,
     )
     _save_context(interaction.user.id, chat)
-    content = _compose_content(_trim_discord_message(result), session, chat)
-    await interaction.edit_original_response(content=content)
+    if image_path is None:
+        error_message = message or "Failed to generate an image."
+        content = _compose_content(_trim_discord_message(error_message), session, chat)
+        await interaction.edit_original_response(content=content)
+        return
+
+    caption = _trim_discord_message(message) if message else chat.board_notice
+    await interaction.edit_original_response(
+        content=caption,
+        attachments=[discord.File(image_path)],
+    )
 
 
 class TopMenuView(discord.ui.View):

@@ -8,11 +8,12 @@ from invoke_client import DEFAULT_SCHEDULER, InvokeAIModel
 
 
 class FakeInvokeAIClient:
-    def __init__(self, host, port, nickname, data_dir):
+    def __init__(self, host, port, nickname, data_dir, image_path: Path):
         self.host = host
         self.port = port
         self.nickname = nickname
         self.data_dir = data_dir
+        self.image_path = image_path
         self.submitted = None
 
     def ensure_board(self, board_name: str):
@@ -21,14 +22,16 @@ class FakeInvokeAIClient:
     def list_models(self):
         return [InvokeAIModel(name="Juggernaut XL v9", base="sdxl", key=None, raw={})]
 
-    def submit_image_generation(self, **kwargs):
+    def generate_image(self, **kwargs):
         self.submitted = kwargs
-        return {"queue_item_id": "item-1"}
+        return {"path": self.image_path}
 
 
 @pytest.mark.parametrize("width,height", [(512, 768), (9999, 16)])
-def test_imagine_request_uses_default_scheduler(monkeypatch, width, height):
-    client = FakeInvokeAIClient("1.1.1.1", 9090, "server", "data")
+def test_imagine_request_uses_default_scheduler(monkeypatch, tmp_path, width, height):
+    image_file = tmp_path / "image.png"
+    image_file.write_bytes(b"fake")
+    client = FakeInvokeAIClient("1.1.1.1", 9090, "server", "data", image_file)
 
     def fake_client_ctor(*args, **kwargs):
         return client
@@ -41,7 +44,7 @@ def test_imagine_request_uses_default_scheduler(monkeypatch, width, height):
         model="Juggernaut XL v9",
     )
 
-    discord_bot._send_imagine_request(
+    _, image_path = discord_bot._send_imagine_request(
         chat,
         prompt="A beach at sunset",
         negative_prompt="",
@@ -52,6 +55,7 @@ def test_imagine_request_uses_default_scheduler(monkeypatch, width, height):
     )
 
     assert client.submitted is not None
+    assert image_path == image_file
     assert client.submitted["scheduler"] == DEFAULT_SCHEDULER
     assert client.submitted["width"] in {512, 2048}
     assert client.submitted["height"] in {768, 64}
