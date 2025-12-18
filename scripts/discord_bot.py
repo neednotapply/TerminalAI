@@ -654,6 +654,11 @@ def _send_imagine_request(
     return None, image_path
 
 
+def _format_imagine_caption(user_mention: str, prompt: str) -> str:
+    cleaned_prompt = " ".join(prompt.split())
+    return f"{user_mention} imagined {cleaned_prompt}."
+
+
 def _trim_discord_message(content: str, limit: int = 1800) -> str:
     return content if len(content) <= limit else content[: limit - 1] + "…"
 
@@ -1007,7 +1012,9 @@ async def imagine_command(
         await interaction.edit_original_response(content=content)
         return
 
-    caption = _trim_discord_message(message) if message else chat.board_notice
+    caption = _trim_discord_message(
+        _format_imagine_caption(interaction.user.mention, prompt_text)
+    )
     await interaction.edit_original_response(
         content=caption,
         attachments=[discord.File(image_path)],

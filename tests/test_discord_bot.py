@@ -61,6 +61,11 @@ def test_imagine_request_uses_default_scheduler(monkeypatch, tmp_path, width, he
     assert client.submitted["height"] in {768, 64}
 
 
+def test_format_imagine_caption_removes_extra_whitespace():
+    caption = discord_bot._format_imagine_caption("@User", "  A cat\n on a   mat  ")
+    assert caption == "@User imagined A cat on a mat."
+
+
 def _reset_discord_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(discord_bot, "SESSIONS_PATH", tmp_path / "discord_sessions.json")
     discord_bot._persisted_state = {"contexts": {}, "sessions": {}}
