@@ -228,7 +228,7 @@ def test_run_chat_mode_uses_saved_model_for_conversation_menu(monkeypatch):
             pass
 
 
-def test_run_chat_mode_conversation_back_keeps_saved_model(monkeypatch):
+def test_run_chat_mode_conversation_back_forgets_saved_model(monkeypatch):
     monkeypatch.setattr(TerminalAI, "clear_screen", lambda force=False: None)
     monkeypatch.setattr(
         TerminalAI,
@@ -244,21 +244,78 @@ def test_run_chat_mode_conversation_back_keeps_saved_model(monkeypatch):
     monkeypatch.setattr(TerminalAI, "select_conversation", lambda model: ("back", None, None, None))
     monkeypatch.setattr(TerminalAI, "chat_loop", lambda *_args, **_kwargs: "exit")
 
-    def fail_select_model(_models):
-        raise AssertionError("select_model should not be called when saved model remains selected")
+    select_model_calls = []
 
-    monkeypatch.setattr(TerminalAI, "select_model", fail_select_model)
-    monkeypatch.setattr(
-        TerminalAI,
-        "_forget_model_selection",
-        lambda _api_type: (_ for _ in ()).throw(AssertionError("model selection should not be forgotten on back")),
-    )
+    def fake_select_model(models):
+        select_model_calls.append(models)
+        return None
+
+    monkeypatch.setattr(TerminalAI, "select_model", fake_select_model)
+
+    forgotten = []
+
+    def fake_forget_model_selection(api_type):
+        forgotten.append(api_type)
+        TerminalAI.MENU_STATE.get(api_type, {}).pop("model", None)
+
+    monkeypatch.setattr(TerminalAI, "_forget_model_selection", fake_forget_model_selection)
 
     with patch("TerminalAI.sys.exit", side_effect=SystemExit):
-        try:
-            TerminalAI.run_chat_mode()
-        except SystemExit:
-            pass
+        TerminalAI.run_chat_mode()
+
+    assert forgotten == ["ollama"]
+    assert select_model_calls == [["saved-model"]]
+
+
+def test_fetch_models_falls_back_to_ollama_tags(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload=None, error=None):
+            self._payload = payload
+            self._error = error
+
+        def raise_for_status(self):
+            if self._error is not None:
+                raise self._error
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, timeout=5):
+        if url.endswith("/v1/models"):
+            return FakeResponse(error=TerminalAI.requests.HTTPError("404"))
+        if url.endswith("/api/tags"):
+            return FakeResponse(payload={"models": [{"name": "llama3"}, {"name": "phi3"}]})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(TerminalAI, "SERVER_URL", "http://example", raising=False)
+    monkeypatch.setattr(TerminalAI.requests, "get", fake_get)
+    monkeypatch.setattr(TerminalAI, "_ensure_model_entry", lambda model: ({}, False))
+    monkeypatch.setattr(TerminalAI, "update_model_capabilities_from_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(TerminalAI, "_save_model_capabilities", lambda: None)
+
+    assert TerminalAI.fetch_models() == ["llama3", "phi3"]
+
+
+def test_fetch_models_returns_empty_when_all_endpoints_fail(monkeypatch):
+    class FakeResponse:
+        def __init__(self, error=None):
+            self._error = error
+
+        def raise_for_status(self):
+            if self._error is not None:
+                raise self._error
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(TerminalAI, "SERVER_URL", "http://example", raising=False)
+    monkeypatch.setattr(
+        TerminalAI.requests,
+        "get",
+        lambda *_args, **_kwargs: FakeResponse(error=TerminalAI.requests.RequestException("down")),
+    )
+
+    assert TerminalAI.fetch_models() == []
 
 
 def test_configure_ollama_model_uses_preselected_server(monkeypatch):
