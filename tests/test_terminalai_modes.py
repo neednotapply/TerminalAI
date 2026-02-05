@@ -226,3 +226,80 @@ def test_run_chat_mode_uses_saved_model_for_conversation_menu(monkeypatch):
             TerminalAI.run_chat_mode()
         except SystemExit:
             pass
+
+
+def test_run_chat_mode_conversation_back_keeps_saved_model(monkeypatch):
+    monkeypatch.setattr(TerminalAI, "clear_screen", lambda force=False: None)
+    monkeypatch.setattr(
+        TerminalAI,
+        "_choose_server_for_api",
+        lambda api_type, allow_back=True: {"ip": "1.1.1.1", "nickname": "srv", "apis": {"ollama": 11434}},
+    )
+    monkeypatch.setattr(TerminalAI, "build_url", lambda *_args, **_kwargs: "http://example")
+    monkeypatch.setattr(TerminalAI, "fetch_models", lambda: ["saved-model"])
+    monkeypatch.setattr(TerminalAI, "MENU_STATE", {"ollama": {"model": "saved-model"}}, raising=False)
+
+    has_conv_calls = iter([True, False])
+    monkeypatch.setattr(TerminalAI, "has_conversations", lambda model: next(has_conv_calls))
+    monkeypatch.setattr(TerminalAI, "select_conversation", lambda model: ("back", None, None, None))
+    monkeypatch.setattr(TerminalAI, "chat_loop", lambda *_args, **_kwargs: "exit")
+
+    def fail_select_model(_models):
+        raise AssertionError("select_model should not be called when saved model remains selected")
+
+    monkeypatch.setattr(TerminalAI, "select_model", fail_select_model)
+    monkeypatch.setattr(
+        TerminalAI,
+        "_forget_model_selection",
+        lambda _api_type: (_ for _ in ()).throw(AssertionError("model selection should not be forgotten on back")),
+    )
+
+    with patch("TerminalAI.sys.exit", side_effect=SystemExit):
+        try:
+            TerminalAI.run_chat_mode()
+        except SystemExit:
+            pass
+
+
+def test_configure_ollama_model_uses_preselected_server(monkeypatch):
+    server = {"ip": "1.1.1.1", "nickname": "srv", "apis": {"ollama": 11434}}
+    monkeypatch.setattr(
+        TerminalAI,
+        "_get_configured_server_for_api",
+        lambda api_type, label: server,
+    )
+    monkeypatch.setattr(TerminalAI, "build_url", lambda *_args, **_kwargs: "http://example")
+    monkeypatch.setattr(TerminalAI, "fetch_models", lambda: ["model-a"])
+    monkeypatch.setattr(TerminalAI, "select_model", lambda models: "model-a")
+
+    remembered = []
+    monkeypatch.setattr(
+        TerminalAI,
+        "_remember_model_selection",
+        lambda api_type, model_name, model_key=None: remembered.append((api_type, model_name, model_key)),
+    )
+    monkeypatch.setattr(TerminalAI, "get_input", lambda _prompt='': "")
+    monkeypatch.setattr(
+        TerminalAI,
+        "_configure_api_server",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("server prompt should not run from model menu")),
+    )
+
+    TerminalAI._configure_ollama_model()
+
+    assert remembered == [("ollama", "model-a", None)]
+
+
+def test_configure_invokeai_model_requires_preselected_server(monkeypatch):
+    monkeypatch.setattr(
+        TerminalAI,
+        "_get_configured_server_for_api",
+        lambda api_type, label: None,
+    )
+    monkeypatch.setattr(
+        TerminalAI,
+        "InvokeAIClient",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("client should not be created without configured server")),
+    )
+
+    TerminalAI._configure_invokeai_model()
