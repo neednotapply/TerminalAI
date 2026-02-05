@@ -228,7 +228,7 @@ def test_run_chat_mode_uses_saved_model_for_conversation_menu(monkeypatch):
             pass
 
 
-def test_run_chat_mode_conversation_back_forgets_saved_model(monkeypatch):
+def test_run_chat_mode_conversation_back_returns_to_main_menu(monkeypatch):
     monkeypatch.setattr(TerminalAI, "clear_screen", lambda force=False: None)
     monkeypatch.setattr(
         TerminalAI,
@@ -264,7 +264,7 @@ def test_run_chat_mode_conversation_back_forgets_saved_model(monkeypatch):
         TerminalAI.run_chat_mode()
 
     assert forgotten == ["ollama"]
-    assert select_model_calls == [["saved-model"]]
+    assert select_model_calls == []
 
 
 def test_fetch_models_falls_back_to_ollama_tags(monkeypatch):

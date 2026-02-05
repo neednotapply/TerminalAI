@@ -321,7 +321,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
         preview = {"path": Path("/tmp/preview.png"), "metadata": {}}
         polled_status = {"status": "completed", "preview": preview}
 
-        with patch.object(TerminalAI, "select_invoke_model", side_effect=[self.model, None]), patch.object(
+        with patch.object(TerminalAI, "select_invoke_model", side_effect=[self.model, None]) as model_select_mock, patch.object(
             TerminalAI, "clear_screen"
         ), patch.object(
             TerminalAI, "_print_invoke_prompt_header"
@@ -338,10 +338,11 @@ class TerminalAIInvokeTests(unittest.TestCase):
         ), patch.object(
             TerminalAI, "select_scheduler_option", return_value="scheduler"
         ), patch.object(
-            TerminalAI, "get_input", side_effect=["Prompt", "", "", "", "ESC"]
+            TerminalAI, "get_input", side_effect=["Prompt", "", "", "ESC"]
         ):
             TerminalAI._run_generation_flow(self.client, [self.model])
 
+        self.assertEqual(model_select_mock.call_count, 1)
         poll_mock.assert_called_once()
         args, kwargs = poll_mock.call_args
         self.assertEqual(args, (self.client, "batch-1"))

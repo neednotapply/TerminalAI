@@ -2381,11 +2381,11 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                     )
 
             acknowledgement = get_input(
-                f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
+                f"{CYAN}Press Enter to prompt again (ESC=return to InvokeAI menu): {RESET}"
             )
             if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
                 _forget_model_selection("invokeai")
-                break
+                return
             refresh_prompt_view = True
 
 
@@ -2522,11 +2522,11 @@ def _run_automatic1111_flow(
                 sampler_default = sampler_used
 
             acknowledgement = get_input(
-                f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
+                f"{CYAN}Press Enter to prompt again (ESC=return to InvokeAI menu): {RESET}"
             )
             if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
                 _forget_model_selection("invokeai")
-                break
+                return
             refresh_prompt_view = True
 def _invoke_generate_image(
     client: InvokeAIClient,
@@ -4046,7 +4046,7 @@ def run_chat_mode():
                     conv_file, messages, history, context = select_conversation(chosen)
                     if conv_file == "back":
                         _forget_model_selection("ollama")
-                        break
+                        return
                 else:
                     print(f"{CYAN}No previous conversations found.{RESET}")
                     conv_file, messages, history, context = (None, [], [], None)
