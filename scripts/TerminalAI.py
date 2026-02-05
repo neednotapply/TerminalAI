@@ -2718,8 +2718,26 @@ def _configure_api_server(api_type: str, label: str) -> Optional[Dict[str, Any]]
     return selected
 
 
+def _get_configured_server_for_api(api_type: str, label: str) -> Optional[Dict[str, Any]]:
+    servers = load_servers(api_type)
+    servers = [server for server in servers if api_type in server.get("apis", {})]
+    if not servers:
+        print(f"{RED}No {label} servers available{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return None
+
+    server = _get_preferred_server(api_type, servers)
+    if server is None:
+        print(
+            f"{YELLOW}No {label} server selected. Choose '{label} Server' in Configure first.{RESET}"
+        )
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return None
+    return server
+
+
 def _configure_ollama_model() -> None:
-    server = _configure_api_server("ollama", "Ollama")
+    server = _get_configured_server_for_api("ollama", "Ollama")
     if server is None:
         return
 
@@ -2748,7 +2766,7 @@ def _configure_ollama_model() -> None:
 
 
 def _configure_invokeai_model() -> None:
-    server = _configure_api_server("invokeai", "InvokeAI")
+    server = _get_configured_server_for_api("invokeai", "InvokeAI")
     if server is None:
         return
 
@@ -4017,7 +4035,6 @@ def run_chat_mode():
                 if has_conversations(chosen):
                     conv_file, messages, history, context = select_conversation(chosen)
                     if conv_file == "back":
-                        _forget_model_selection("ollama")
                         break
                 else:
                     print(f"{CYAN}No previous conversations found.{RESET}")
@@ -4029,7 +4046,6 @@ def run_chat_mode():
                     if has_conversations(chosen):
                         continue
                     conv_file = "back"
-                    _forget_model_selection("ollama")
                     break
                 if result == "server_inactive":
                     conv_file = "server_inactive"
