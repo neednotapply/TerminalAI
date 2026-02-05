@@ -4,3 +4,5 @@ data/ollama.endpoints.csv
 data/automatic1111.endpoints.csv
 data/invoke.endpoints.csv
 data/model_capabilities.json
+/data/images
+data/menu_state.json
