@@ -392,7 +392,14 @@ def _load_menu_state() -> None:
             numeric_port = int(port)
         except (TypeError, ValueError):
             continue
-        MENU_STATE[api_type] = {"ip": ip.strip(), "port": numeric_port}
+        cleaned_entry: Dict[str, Any] = {"ip": ip.strip(), "port": numeric_port}
+        model = entry.get("model")
+        if isinstance(model, str) and model.strip():
+            cleaned_entry["model"] = model.strip()
+        model_key = entry.get("model_key")
+        if isinstance(model_key, str) and model_key.strip():
+            cleaned_entry["model_key"] = model_key.strip()
+        MENU_STATE[api_type] = cleaned_entry
 
 
 def _save_menu_state() -> None:
@@ -408,7 +415,14 @@ def _save_menu_state() -> None:
             numeric_port = int(port)
         except (TypeError, ValueError):
             continue
-        payload[api_type] = {"ip": ip.strip(), "port": numeric_port}
+        cleaned_entry: Dict[str, Any] = {"ip": ip.strip(), "port": numeric_port}
+        model = entry.get("model")
+        if isinstance(model, str) and model.strip():
+            cleaned_entry["model"] = model.strip()
+        model_key = entry.get("model_key")
+        if isinstance(model_key, str) and model_key.strip():
+            cleaned_entry["model_key"] = model_key.strip()
+        payload[api_type] = cleaned_entry
 
     try:
         MENU_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -426,8 +440,46 @@ def _remember_server_selection(api_type: str, server: Dict[str, Any]) -> None:
         numeric_port = int(port)
     except (TypeError, ValueError):
         return
-    MENU_STATE[api_type] = {"ip": server.get("ip", ""), "port": numeric_port}
+    existing = MENU_STATE.get(api_type)
+    entry: Dict[str, Any] = {}
+    if isinstance(existing, dict):
+        entry.update(existing)
+    entry["ip"] = server.get("ip", "")
+    entry["port"] = numeric_port
+    MENU_STATE[api_type] = entry
     _save_menu_state()
+
+
+def _remember_model_selection(api_type: str, model_name: str, model_key: Optional[str] = None) -> None:
+    if not isinstance(model_name, str) or not model_name.strip():
+        return
+    existing = MENU_STATE.get(api_type)
+    entry: Dict[str, Any] = {}
+    if isinstance(existing, dict):
+        entry.update(existing)
+    entry["model"] = model_name.strip()
+    if isinstance(model_key, str) and model_key.strip():
+        entry["model_key"] = model_key.strip()
+    else:
+        entry.pop("model_key", None)
+    MENU_STATE[api_type] = entry
+    _save_menu_state()
+
+
+def _forget_model_selection(api_type: str) -> None:
+    entry = MENU_STATE.get(api_type)
+    if not isinstance(entry, dict):
+        return
+    changed = False
+    if "model" in entry:
+        entry.pop("model", None)
+        changed = True
+    if "model_key" in entry:
+        entry.pop("model_key", None)
+        changed = True
+    if changed:
+        MENU_STATE[api_type] = entry
+        _save_menu_state()
 
 
 def _forget_server_selection(api_type: str) -> None:
@@ -460,6 +512,43 @@ def _get_preferred_server(api_type: str, servers: List[Dict[str, Any]]) -> Optio
             continue
         if server_port == selected_port_value:
             return server
+    return None
+
+
+def _get_preferred_ollama_model(models: List[str]) -> Optional[str]:
+    entry = MENU_STATE.get("ollama")
+    if not isinstance(entry, dict):
+        return None
+    preferred = entry.get("model")
+    if not isinstance(preferred, str):
+        return None
+    preferred_name = preferred.strip()
+    if not preferred_name:
+        return None
+    for model in models:
+        if isinstance(model, str) and model == preferred_name:
+            return model
+    return None
+
+
+def _get_preferred_invoke_model(models: List[InvokeAIModel]) -> Optional[InvokeAIModel]:
+    entry = MENU_STATE.get("invokeai")
+    if not isinstance(entry, dict):
+        return None
+
+    preferred_key = entry.get("model_key")
+    if isinstance(preferred_key, str) and preferred_key.strip():
+        normalized_key = preferred_key.strip()
+        for model in models:
+            if isinstance(model.key, str) and model.key.strip() == normalized_key:
+                return model
+
+    preferred_name = entry.get("model")
+    if isinstance(preferred_name, str) and preferred_name.strip():
+        normalized_name = preferred_name.strip()
+        for model in models:
+            if isinstance(model.name, str) and model.name.strip() == normalized_name:
+                return model
     return None
 
 
@@ -2159,9 +2248,12 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
         scheduler_options = [DEFAULT_SCHEDULER]
 
     while True:
-        model = select_invoke_model(models)
+        model = _get_preferred_invoke_model(models)
         if model is None:
-            return
+            model = select_invoke_model(models)
+            if model is None:
+                return
+        _remember_model_selection("invokeai", model.name, model.key)
 
         refresh_prompt_view = True
         while True:
@@ -2292,6 +2384,7 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                 f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
             )
             if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
+                _forget_model_selection("invokeai")
                 break
             refresh_prompt_view = True
 
@@ -2432,6 +2525,7 @@ def _run_automatic1111_flow(
                 f"{CYAN}Press Enter to prompt again (ESC=change model): {RESET}"
             )
             if isinstance(acknowledgement, str) and acknowledgement.strip().lower() == "esc":
+                _forget_model_selection("invokeai")
                 break
             refresh_prompt_view = True
 def _invoke_generate_image(
@@ -2607,24 +2701,92 @@ def dispatch_mode(mode_key: str) -> bool:
     return True
 
 
-def _configure_api_server(api_type: str, label: str) -> None:
+def _configure_api_server(api_type: str, label: str) -> Optional[Dict[str, Any]]:
     servers = load_servers(api_type)
     servers = [server for server in servers if api_type in server.get("apis", {})]
     if not servers:
         print(f"{RED}No {label} servers available{RESET}")
         get_input(f"{CYAN}Press Enter to return{RESET}")
-        return
+        return None
 
     selected = select_server(servers, allow_back=True)
     if selected is None:
-        return
+        return None
     _remember_server_selection(api_type, selected)
     print(f"{GREEN}Selected {label} server: {selected['nickname']} ({selected['ip']}){RESET}")
+    get_input(f"{CYAN}Press Enter to continue{RESET}")
+    return selected
+
+
+def _configure_ollama_model() -> None:
+    server = _configure_api_server("ollama", "Ollama")
+    if server is None:
+        return
+
+    global SERVER_URL, selected_server, selected_api
+    selected_api = "ollama"
+    selected_server = server
+    SERVER_URL = build_url(server, "ollama")
+
+    models = fetch_models()
+    if not models:
+        print(f"{YELLOW}No Ollama models found on the selected server{RESET}")
+        _forget_model_selection("ollama")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    preferred = _get_preferred_ollama_model(models)
+    if preferred is not None:
+        print(f"{GREEN}Current model: {preferred}{RESET}")
+
+    chosen = select_model(models)
+    if chosen is None:
+        return
+    _remember_model_selection("ollama", chosen)
+    print(f"{GREEN}Saved Ollama model: {chosen}{RESET}")
+    get_input(f"{CYAN}Press Enter to continue{RESET}")
+
+
+def _configure_invokeai_model() -> None:
+    server = _configure_api_server("invokeai", "InvokeAI")
+    if server is None:
+        return
+
+    selected_port = server.get("apis", {}).get("invokeai")
+    if selected_port is None:
+        print(f"{RED}Selected server does not expose InvokeAI API{RESET}")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    client = InvokeAIClient(server["ip"], selected_port, server.get("nickname"), DATA_DIR)
+    try:
+        models = client.list_models()
+    except (InvokeAIClientError, requests.RequestException) as exc:
+        print(f"{RED}Failed to retrieve InvokeAI models: {exc}{RESET}")
+        _forget_model_selection("invokeai")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    if not models:
+        print(f"{YELLOW}No InvokeAI models found on the selected server{RESET}")
+        _forget_model_selection("invokeai")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    preferred = _get_preferred_invoke_model(models)
+    if preferred is not None:
+        print(f"{GREEN}Current model: {preferred.name}{RESET}")
+
+    chosen = select_invoke_model(models)
+    if chosen is None:
+        return
+    _remember_model_selection("invokeai", chosen.name, chosen.key)
+    print(f"{GREEN}Saved InvokeAI model: {chosen.name}{RESET}")
     get_input(f"{CYAN}Press Enter to continue{RESET}")
 
 
 def run_configure_menu() -> None:
-    options = ["Shodan Scan", "Ollama Servers", "InvokeAI Servers", "[Back]"]
+    options = ["Shodan Scan", "Ollama Server", "Ollama Model", "InvokeAI Server", "InvokeAI Model", "[Back]"]
     while True:
         selection = _prompt_selection("Configure:", options)
         if selection is None or selection == len(options) - 1:
@@ -2639,7 +2801,17 @@ def run_configure_menu() -> None:
             continue
         if selection == 2:
             clear_screen()
+            _configure_ollama_model()
+            clear_screen()
+            continue
+        if selection == 3:
+            clear_screen()
             _configure_api_server("invokeai", "InvokeAI")
+            clear_screen()
+            continue
+        if selection == 4:
+            clear_screen()
+            _configure_invokeai_model()
             clear_screen()
             continue
 
@@ -3819,16 +3991,21 @@ def run_chat_mode():
             continue
 
         while True:
-            chosen = select_model(models)
+            chosen = _get_preferred_ollama_model(models)
             if chosen is None:
-                clear_screen()
-                return
+                chosen = select_model(models)
+                if chosen is None:
+                    clear_screen()
+                    return
+            _remember_model_selection("ollama", chosen)
+
             embedding_info = MODEL_CAPABILITIES.get(chosen, {})
             embedding_confirmed = bool(embedding_info.get("confirmed"))
             embedding_detected = embedding_confirmed or is_embedding_model(chosen)
             if embedding_detected:
                 clear_screen()
                 mark_model_as_embedding(chosen)
+                _forget_model_selection("ollama")
                 print(
                     f"{YELLOW}Model '{chosen}' is an embedding model and cannot be used for chat.{RESET}"
                 )
@@ -3840,6 +4017,7 @@ def run_chat_mode():
                 if has_conversations(chosen):
                     conv_file, messages, history, context = select_conversation(chosen)
                     if conv_file == "back":
+                        _forget_model_selection("ollama")
                         break
                 else:
                     print(f"{CYAN}No previous conversations found.{RESET}")
@@ -3851,12 +4029,14 @@ def run_chat_mode():
                     if has_conversations(chosen):
                         continue
                     conv_file = "back"
+                    _forget_model_selection("ollama")
                     break
                 if result == "server_inactive":
                     conv_file = "server_inactive"
                     break
                 if result == "embedding_only":
                     conv_file = "embedding_only"
+                    _forget_model_selection("ollama")
                     break
                 if result == "exit":
                     sys.exit(0)
