@@ -103,3 +103,47 @@ def test_choose_server_for_api_prompts_and_persists(monkeypatch):
 
     assert selected == servers[0]
     assert remembered == [("invokeai", servers[0])]
+
+
+def test_run_chat_mode_model_back_returns_to_main(monkeypatch):
+    monkeypatch.setattr(TerminalAI, "clear_screen", lambda force=False: None)
+    monkeypatch.setattr(
+        TerminalAI,
+        "_choose_server_for_api",
+        lambda api_type, allow_back=True: {"ip": "1.1.1.1", "nickname": "srv", "apis": {"ollama": 11434}},
+    )
+    monkeypatch.setattr(TerminalAI, "build_url", lambda *_args, **_kwargs: "http://example")
+    monkeypatch.setattr(TerminalAI, "fetch_models", lambda: ["model-a"])
+    monkeypatch.setattr(TerminalAI, "select_model", lambda models: None)
+
+    TerminalAI.run_chat_mode()
+
+
+def test_run_image_mode_back_returns_to_main(monkeypatch):
+    monkeypatch.setattr(TerminalAI, "clear_screen", lambda force=False: None)
+    monkeypatch.setattr(
+        TerminalAI,
+        "_choose_server_for_api",
+        lambda api_type, allow_back=True: {"ip": "1.1.1.1", "nickname": "srv", "apis": {"invokeai": 9090}},
+    )
+
+    class _Client:
+        nickname = "srv"
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def check_health(self):
+            return None
+
+        def ensure_board(self, _name):
+            return "terminalai"
+
+        def list_models(self):
+            return []
+
+    monkeypatch.setattr(TerminalAI, "InvokeAIClient", _Client)
+    monkeypatch.setattr(TerminalAI, "interactive_menu", lambda _header, _options: None)
+    monkeypatch.setattr(TerminalAI, "get_input", lambda _prompt='': "")
+
+    TerminalAI.run_image_mode()

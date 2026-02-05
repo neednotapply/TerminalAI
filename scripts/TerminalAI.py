@@ -3822,7 +3822,7 @@ def run_chat_mode():
             chosen = select_model(models)
             if chosen is None:
                 clear_screen()
-                break
+                return
             embedding_info = MODEL_CAPABILITIES.get(chosen, {})
             embedding_confirmed = bool(embedding_info.get("confirmed"))
             embedding_detected = embedding_confirmed or is_embedding_model(chosen)
@@ -3974,7 +3974,7 @@ def run_image_mode():
             header = f"InvokeAI on {client.nickname}:"
             choice = interactive_menu(header, options)
             if choice is None or choice == len(options) - 1:
-                break
+                return
             if choice == 0:
                 clear_screen()
                 _view_server_boards(client)
