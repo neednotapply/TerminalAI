@@ -3440,41 +3440,51 @@ def select_sampler_option(options: List[str], default_value: str) -> Optional[st
 
 
 def fetch_models():
+    models: List[str] = []
+    primary_error: Optional[Exception] = None
+
     try:
         r = requests.get(f"{SERVER_URL}/v1/models", timeout=5)
         r.raise_for_status()
         data = r.json()
-        models = []
         for m in data.get("models", []) or data.get("data", []) or []:
             if isinstance(m, dict):
                 models.append(m.get("id") or m.get("name") or "")
             elif isinstance(m, str):
                 models.append(m)
-        models = [m for m in models if m]
-        seen_changes = False
-        for model_name in models:
-            _, created = _ensure_model_entry(model_name)
-            if created:
-                seen_changes = True
-        if seen_changes:
-            _save_model_capabilities()
-        try:
-            tags_resp = requests.get(f"{SERVER_URL}/api/tags", timeout=5)
-            tags_resp.raise_for_status()
-            tags_payload = tags_resp.json()
-            tag_models = tags_payload.get("models")
-            if isinstance(tag_models, list):
-                for entry in tag_models:
-                    if isinstance(entry, dict):
-                        name = entry.get("name") or entry.get("model") or entry.get("id")
-                        if name:
-                            update_model_capabilities_from_metadata(name, entry)
-        except (requests.RequestException, ValueError):
-            pass
-        return models
-    except Exception as e:
-        print(f"{RED}Failed to fetch models: {e}{RESET}")
-        return []
+    except Exception as exc:
+        primary_error = exc
+
+    try:
+        tags_resp = requests.get(f"{SERVER_URL}/api/tags", timeout=5)
+        tags_resp.raise_for_status()
+        tags_payload = tags_resp.json()
+        tag_models = tags_payload.get("models")
+        if isinstance(tag_models, list):
+            for entry in tag_models:
+                if isinstance(entry, dict):
+                    name = entry.get("name") or entry.get("model") or entry.get("id")
+                    if name:
+                        models.append(name)
+                        update_model_capabilities_from_metadata(name, entry)
+                elif isinstance(entry, str):
+                    models.append(entry)
+    except Exception:
+        if primary_error is not None:
+            print(f"{RED}Failed to fetch models: {primary_error}{RESET}")
+            return []
+
+    models = [m for m in dict.fromkeys(models) if m]
+
+    seen_changes = False
+    for model_name in models:
+        _, created = _ensure_model_entry(model_name)
+        if created:
+            seen_changes = True
+    if seen_changes:
+        _save_model_capabilities()
+
+    return models
 
 
 
@@ -4035,6 +4045,7 @@ def run_chat_mode():
                 if has_conversations(chosen):
                     conv_file, messages, history, context = select_conversation(chosen)
                     if conv_file == "back":
+                        _forget_model_selection("ollama")
                         break
                 else:
                     print(f"{CYAN}No previous conversations found.{RESET}")
