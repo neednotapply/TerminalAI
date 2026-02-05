@@ -129,7 +129,10 @@ DEBUG_FLAGS = {"--debug", "--verbose"}
 DEBUG_MODE = any(flag in sys.argv for flag in DEBUG_FLAGS)
 
 MODE_ALIASES = {
-    "chat": "llm-ollama",
+    "chat": "chat",
+    "imagine": "imagine",
+    "configure": "configure",
+    "ollama": "llm-ollama",
     "llm": "llm",
     "llm-ollama": "llm-ollama",
     "image": "image-invokeai",
@@ -144,6 +147,9 @@ MODE_ALIASES = {
     "scan": "shodan",
 }
 MODE_LABELS = {
+    "chat": "Chat",
+    "imagine": "Imagine",
+    "configure": "Configure",
     "llm": "LLM Chat",
     "llm-ollama": "LLM Chat (Ollama)",
     "image": "Image Generation",
@@ -275,7 +281,9 @@ CONV_DIR = DATA_DIR / "conversations"
 LOG_DIR = DATA_DIR / "logs"
 
 MODEL_CAPABILITIES_FILE = DATA_DIR / "model_capabilities.json"
+MENU_STATE_FILE = DATA_DIR / "menu_state.json"
 MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {}
+MENU_STATE: Dict[str, Dict[str, Any]] = {}
 EMBED_MODEL_KEYWORDS = ("embed", "embedding")
 
 
@@ -355,6 +363,124 @@ def _save_model_capabilities() -> None:
 
 
 _load_model_capabilities()
+
+
+def _load_menu_state() -> None:
+    global MENU_STATE
+
+    MENU_STATE = {}
+    try:
+        with MENU_STATE_FILE.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        return
+
+    if not isinstance(data, dict):
+        return
+
+    for api_type in ("ollama", "invokeai"):
+        entry = data.get(api_type)
+        if not isinstance(entry, dict):
+            continue
+        ip = entry.get("ip")
+        port = entry.get("port")
+        if not isinstance(ip, str) or not ip.strip():
+            continue
+        try:
+            numeric_port = int(port)
+        except (TypeError, ValueError):
+            continue
+        MENU_STATE[api_type] = {"ip": ip.strip(), "port": numeric_port}
+
+
+def _save_menu_state() -> None:
+    payload: Dict[str, Dict[str, Any]] = {}
+    for api_type, entry in MENU_STATE.items():
+        if not isinstance(entry, dict):
+            continue
+        ip = entry.get("ip")
+        port = entry.get("port")
+        if not isinstance(ip, str) or not ip.strip():
+            continue
+        try:
+            numeric_port = int(port)
+        except (TypeError, ValueError):
+            continue
+        payload[api_type] = {"ip": ip.strip(), "port": numeric_port}
+
+    try:
+        MENU_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with MENU_STATE_FILE.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+    except OSError:
+        return
+
+
+def _remember_server_selection(api_type: str, server: Dict[str, Any]) -> None:
+    port = server.get("apis", {}).get(api_type)
+    if port is None:
+        return
+    try:
+        numeric_port = int(port)
+    except (TypeError, ValueError):
+        return
+    MENU_STATE[api_type] = {"ip": server.get("ip", ""), "port": numeric_port}
+    _save_menu_state()
+
+
+def _forget_server_selection(api_type: str) -> None:
+    if api_type in MENU_STATE:
+        MENU_STATE.pop(api_type, None)
+        _save_menu_state()
+
+
+def _get_preferred_server(api_type: str, servers: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    selection = MENU_STATE.get(api_type)
+    if not isinstance(selection, dict):
+        return None
+
+    selected_ip = selection.get("ip")
+    selected_port = selection.get("port")
+    if not isinstance(selected_ip, str):
+        return None
+    try:
+        selected_port_value = int(selected_port)
+    except (TypeError, ValueError):
+        return None
+
+    for server in servers:
+        if server.get("ip") != selected_ip:
+            continue
+        port = server.get("apis", {}).get(api_type)
+        try:
+            server_port = int(port)
+        except (TypeError, ValueError):
+            continue
+        if server_port == selected_port_value:
+            return server
+    return None
+
+
+def _choose_server_for_api(api_type: str, *, allow_back: bool) -> Optional[Dict[str, Any]]:
+    servers = load_servers(api_type)
+    servers = [server for server in servers if api_type in server.get("apis", {})]
+    if not servers:
+        return None
+
+    preferred = _get_preferred_server(api_type, servers)
+    if preferred is not None:
+        return preferred
+
+    selected = select_server(servers, allow_back=allow_back)
+    if selected is None:
+        return None
+    _remember_server_selection(api_type, selected)
+    return selected
+
+
+_load_menu_state()
 
 
 def _has_embedding_keyword(value: Any) -> bool:
@@ -2458,8 +2584,9 @@ def _prompt_selection(header: str, options: List[str]) -> Optional[int]:
 
 def choose_mode() -> str:
     options = [
-        ("LLM Chat", "llm"),
-        ("Image Generation", "image"),
+        ("Chat", "chat"),
+        ("Imagine", "imagine"),
+        ("Configure", "configure"),
         ("[Exit]", "exit"),
     ]
     labels = [label for label, _ in options]
@@ -2480,69 +2607,49 @@ def dispatch_mode(mode_key: str) -> bool:
     return True
 
 
-def run_provider_actions(
-    provider_label: str,
-    handler: Callable[[], None],
-    api_type: str,
-) -> None:
-    """Present shared actions for a provider, including scoped Shodan scans."""
+def _configure_api_server(api_type: str, label: str) -> None:
+    servers = load_servers(api_type)
+    servers = [server for server in servers if api_type in server.get("apis", {})]
+    if not servers:
+        print(f"{RED}No {label} servers available{RESET}")
+        get_input(f"{CYAN}Press Enter to return{RESET}")
+        return
 
-    options = ["Servers", "Shodan Scan", "[Back]"]
-    header = f"{provider_label} Options:"
+    selected = select_server(servers, allow_back=True)
+    if selected is None:
+        return
+    _remember_server_selection(api_type, selected)
+    print(f"{GREEN}Selected {label} server: {selected['nickname']} ({selected['ip']}){RESET}")
+    get_input(f"{CYAN}Press Enter to continue{RESET}")
 
+
+def run_configure_menu() -> None:
+    options = ["Shodan Scan", "Ollama Servers", "InvokeAI Servers", "[Back]"]
     while True:
-        selection = _prompt_selection(header, options)
+        selection = _prompt_selection("Configure:", options)
         if selection is None or selection == len(options) - 1:
             return
         if selection == 0:
-            handler()
+            run_shodan_scan()
             continue
         if selection == 1:
-            run_shodan_scan(api_type)
+            clear_screen()
+            _configure_api_server("ollama", "Ollama")
+            clear_screen()
+            continue
+        if selection == 2:
+            clear_screen()
+            _configure_api_server("invokeai", "InvokeAI")
+            clear_screen()
             continue
 
 
 def run_llm_menu() -> None:
-    providers = [
-        {
-            "label": "Ollama",
-            "handler": run_chat_mode,
-            "api_type": "ollama",
-        }
-    ]
-    labels = [provider["label"] for provider in providers] + ["[Back]"]
-
-    while True:
-        selection = _prompt_selection("Select LLM Provider:", labels)
-        if selection is None or selection == len(labels) - 1:
-            return
-        provider = providers[selection]
-        run_provider_actions(provider["label"], provider["handler"], provider["api_type"])
-        return
+    run_chat_mode()
 
 
 def run_image_menu() -> None:
-    providers = [
-        {
-            "label": "InvokeAI",
-            "handler": run_image_mode,
-            "api_type": "invokeai",
-        },
-        {
-            "label": "Automatic1111",
-            "handler": run_automatic1111_mode,
-            "api_type": "automatic1111",
-        },
-    ]
-    labels = [provider["label"] for provider in providers] + ["[Back]"]
-
-    while True:
-        selection = _prompt_selection("Select Image Generation Provider:", labels)
-        if selection is None or selection == len(labels) - 1:
-            return
-        provider = providers[selection]
-        run_provider_actions(provider["label"], provider["handler"], provider["api_type"])
-        return
+    run_image_mode()
 
 
 def run_automatic1111_mode() -> None:
@@ -2624,7 +2731,7 @@ def run_automatic1111_mode() -> None:
             header = f"Automatic1111 on {client.nickname}:"
             choice = interactive_menu(header, options)
             if choice is None or choice == len(options) - 1:
-                break
+                return
             if choice == 0:
                 clear_screen()
                 _run_automatic1111_flow(client, models)
@@ -3681,15 +3788,10 @@ def run_chat_mode():
     selected_api = "ollama"
     while True:
         clear_screen()
-        servers = load_servers("ollama")
-        srv_list = [s for s in servers if selected_api in s["apis"]]
-        if not srv_list:
+        choice = _choose_server_for_api("ollama", allow_back=True)
+        if choice is None:
             print(f"{RED}No active Ollama servers available{RESET}")
             get_input(f"{CYAN}Press Enter to return to the main menu{RESET}")
-            return
-
-        choice = select_server(srv_list, allow_back=True)
-        if choice is None:
             return
         selected_server = choice
         clear_screen()
@@ -3698,6 +3800,7 @@ def run_chat_mode():
         models = fetch_models()
         if not models:
             print(f"{RED}No models found on selected server{RESET}")
+            _forget_server_selection("ollama")
             try:
                 df = read_endpoints(selected_api)
                 mask = endpoint_mask(
@@ -3719,7 +3822,7 @@ def run_chat_mode():
             chosen = select_model(models)
             if chosen is None:
                 clear_screen()
-                break
+                return
             embedding_info = MODEL_CAPABILITIES.get(chosen, {})
             embedding_confirmed = bool(embedding_info.get("confirmed"))
             embedding_detected = embedding_confirmed or is_embedding_model(chosen)
@@ -3776,14 +3879,10 @@ def run_image_mode():
     selected_api = "invokeai"
     while True:
         clear_screen()
-        servers = load_servers("invokeai")
-        if not servers:
+        server_choice = _choose_server_for_api("invokeai", allow_back=True)
+        if server_choice is None:
             print(f"{RED}No InvokeAI servers available{RESET}")
             get_input(f"{CYAN}Press Enter to return to the main menu{RESET}")
-            return
-
-        server_choice = select_server(servers, allow_back=True)
-        if server_choice is None:
             return
         selected_server = server_choice
         port = selected_server["apis"].get("invokeai")
@@ -3797,10 +3896,12 @@ def run_image_mode():
             client.check_health()
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
+            _forget_server_selection("invokeai")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
         except requests.RequestException as exc:
             print(f"{RED}Network error while verifying InvokeAI server: {exc}{RESET}")
+            _forget_server_selection("invokeai")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
 
@@ -3808,10 +3909,12 @@ def run_image_mode():
             board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
+            _forget_server_selection("invokeai")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
         if not _is_valid_terminalai_board_id(board_id):
             print(f"{RED}{TERMINALAI_BOARD_ID_ERROR_MESSAGE}{RESET}")
+            _forget_server_selection("invokeai")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
 
@@ -3823,6 +3926,7 @@ def run_image_mode():
             models = client.list_models()
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
+            _forget_server_selection("invokeai")
             try:
                 df = read_endpoints(selected_api)
                 mask = endpoint_mask(
@@ -3842,6 +3946,7 @@ def run_image_mode():
             continue
         except requests.RequestException as exc:
             print(f"{RED}Failed to retrieve models: {exc}{RESET}")
+            _forget_server_selection("invokeai")
             try:
                 df = read_endpoints(selected_api)
                 mask = endpoint_mask(
@@ -3869,7 +3974,7 @@ def run_image_mode():
             header = f"InvokeAI on {client.nickname}:"
             choice = interactive_menu(header, options)
             if choice is None or choice == len(options) - 1:
-                break
+                return
             if choice == 0:
                 clear_screen()
                 _view_server_boards(client)
@@ -3890,6 +3995,9 @@ def run_image_mode():
 # Main loop
 MODE_DISPATCH.update(
     {
+        "chat": run_chat_mode,
+        "imagine": run_image_mode,
+        "configure": run_configure_menu,
         "llm": run_llm_menu,
         "llm-ollama": run_chat_mode,
         "image": run_image_menu,

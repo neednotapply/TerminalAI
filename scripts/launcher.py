@@ -21,45 +21,32 @@ HEADER_LINES = [
 ]
 
 TOP_LEVEL_OPTIONS = [
-    {"label": "Chat", "key": "chat"},
-    {"label": "Imagine", "key": "imagine"},
-    {"label": "Shodan Scan", "key": "shodan"},
+    {
+        "label": "Chat",
+        "key": "chat",
+        "script": "TerminalAI.py",
+        "extra_args": ["--mode", "chat"],
+        "clear_before": False,
+    },
+    {
+        "label": "Imagine",
+        "key": "imagine",
+        "script": "TerminalAI.py",
+        "extra_args": ["--mode", "imagine"],
+        "clear_before": False,
+    },
+    {
+        "label": "Configure",
+        "key": "configure",
+        "script": "TerminalAI.py",
+        "extra_args": ["--mode", "configure"],
+        "clear_before": False,
+    },
     {"label": "[Exit]", "key": "exit"},
 ]
 
-PROVIDER_OPTIONS = {
-    "chat": [
-        {
-            "label": "Ollama Servers",
-            "script": "TerminalAI.py",
-            "extra_args": ["--mode", "llm-ollama"],
-            "clear_before": False,
-        },
-        {"label": "[Back]", "key": "back"},
-    ],
-    "imagine": [
-        {
-            "label": "InvokeAI Servers",
-            "script": "TerminalAI.py",
-            "extra_args": ["--mode", "image-invokeai"],
-        },
-        {"label": "[Back]", "key": "back"},
-    ],
-    "shodan": [
-        {
-            "label": "Scan all servers",
-            "script": "shodanscan.py",
-            "extra_args": [],
-        },
-        {"label": "[Back]", "key": "back"},
-    ],
-}
-
-PROVIDER_HEADERS = {
-    "chat": "Select a chat action:",
-    "imagine": "Select an imagine action:",
-    "shodan": "Run a Shodan scan:",
-}
+PROVIDER_OPTIONS = {}
+PROVIDER_HEADERS = {}
 
 OPTIONS = [opt["label"] for opt in TOP_LEVEL_OPTIONS]
 DEBUG_FLAGS = {"--debug", "--verbose"}
@@ -515,19 +502,10 @@ def main() -> None:
             return
 
         top_option = TOP_LEVEL_OPTIONS[choice]
-        key = top_option.get("key")
-
-        if key == "exit":
+        if top_option.get("key") == "exit":
             return
 
-        if key not in PROVIDER_OPTIONS:
-            continue
-
-        option = prompt_provider_menu(key)
-        if option is None:
-            continue
-
-        run_selected_option(option, args, script_dir)
+        run_selected_option(top_option, args, script_dir)
 
 
 if __name__ == "__main__":
