@@ -21,8 +21,8 @@ HEADER_LINES = [
 ]
 
 TOP_LEVEL_OPTIONS = [
-    {"label": "Setup /Chat", "key": "chat"},
-    {"label": "Setup /Imagine", "key": "imagine"},
+    {"label": "Chat", "key": "chat"},
+    {"label": "Imagine", "key": "imagine"},
     {"label": "Shodan Scan", "key": "shodan"},
     {"label": "[Exit]", "key": "exit"},
 ]
@@ -56,8 +56,8 @@ PROVIDER_OPTIONS = {
 }
 
 PROVIDER_HEADERS = {
-    "chat": "Select a chat setup action:",
-    "imagine": "Select an imagine setup action:",
+    "chat": "Select a chat action:",
+    "imagine": "Select an imagine action:",
     "shodan": "Run a Shodan scan:",
 }
 
