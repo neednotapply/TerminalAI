@@ -66,3 +66,40 @@ def test_run_shodan_scan_injects_api_type(monkeypatch):
     api_index = cmd.index("--api-type")
     assert api_index + 1 < len(cmd)
     assert cmd[api_index + 1] == "invokeai"
+
+
+def test_choose_server_for_api_prefers_saved_server(monkeypatch):
+    servers = [
+        {"ip": "1.1.1.1", "nickname": "first", "apis": {"ollama": 11434}},
+        {"ip": "2.2.2.2", "nickname": "second", "apis": {"ollama": 11434}},
+    ]
+    monkeypatch.setattr(TerminalAI, "load_servers", lambda api: servers)
+    monkeypatch.setattr(
+        TerminalAI,
+        "MENU_STATE",
+        {"ollama": {"ip": "2.2.2.2", "port": 11434}},
+        raising=False,
+    )
+
+    selected = TerminalAI._choose_server_for_api("ollama", allow_back=True)
+
+    assert selected == servers[1]
+
+
+def test_choose_server_for_api_prompts_and_persists(monkeypatch):
+    servers = [{"ip": "1.1.1.1", "nickname": "first", "apis": {"invokeai": 9090}}]
+    remembered = []
+
+    monkeypatch.setattr(TerminalAI, "load_servers", lambda api: servers)
+    monkeypatch.setattr(TerminalAI, "MENU_STATE", {}, raising=False)
+    monkeypatch.setattr(TerminalAI, "select_server", lambda options, allow_back=False: options[0])
+    monkeypatch.setattr(
+        TerminalAI,
+        "_remember_server_selection",
+        lambda api_type, server: remembered.append((api_type, server)),
+    )
+
+    selected = TerminalAI._choose_server_for_api("invokeai", allow_back=True)
+
+    assert selected == servers[0]
+    assert remembered == [("invokeai", servers[0])]
