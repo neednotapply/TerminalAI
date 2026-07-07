@@ -1211,6 +1211,107 @@ async def _reply_to_mention(
         await message.reply(_trim_discord_message(body), mention_author=False)
 
 
+# TerminalAI Discord direct-mode navigation (launcher-compatible)
+async def _show_endpoint_menu(
+    interaction: discord.Interaction,
+    session: MenuSession,
+    provider_label: str,
+    mode: str,
+) -> None:
+    """Show the server selector for a direct Chat or Imagine menu action."""
+
+    endpoints = _load_endpoints(mode)
+    session.mode = mode
+    session.endpoints = endpoints
+    session.provider_label = provider_label
+    session.chat = None
+    _persist_session(session)
+
+    if endpoints:
+        view = discord.ui.View(timeout=300)
+        view.add_item(EndpointSelect(provider_label, endpoints, mode, session))
+        content = _compose_content(
+            f"Select a server for **{provider_label}**:", session
+        )
+        await _update_menu_message(interaction, content, view)
+        return
+
+    content = _compose_content(
+        f"No verified active servers found for **{provider_label}**. "
+        "Use **Configure → Scan all servers** to look for new ones.",
+        session,
+    )
+    await _update_menu_message(interaction, content, ConfigureView(session))
+
+
+class ConfigureSelect(discord.ui.Select):
+    """Discord equivalent of TerminalAI's direct Configure menu."""
+
+    def __init__(self, session: MenuSession):
+        options = [
+            discord.SelectOption(label="Scan all servers", value="scan"),
+            discord.SelectOption(label="Choose Ollama server", value="ollama"),
+            discord.SelectOption(label="Choose InvokeAI server", value="invokeai"),
+            discord.SelectOption(label="[Back]", value="back"),
+        ]
+        super().__init__(
+            placeholder="Choose a configuration action",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        action = self.values[0]
+
+        if action == "back":
+            self.session.log("Configure -> Back")
+            await _update_menu_message(
+                interaction,
+                _compose_content("Pick a menu to get started.", self.session),
+                TopMenuView(self.session),
+            )
+            return
+
+        if action == "ollama":
+            self.session.log("Configure -> Ollama Servers")
+            await _show_endpoint_menu(
+                interaction,
+                self.session,
+                "Ollama",
+                "llm-ollama",
+            )
+            return
+
+        if action == "invokeai":
+            self.session.log("Configure -> InvokeAI Servers")
+            await _show_endpoint_menu(
+                interaction,
+                self.session,
+                "InvokeAI",
+                "image-invokeai",
+            )
+            return
+
+        self.session.log("Configure -> Scan all servers")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        scan_option = {"script": "shodanscan.py", "extra_args": []}
+        result = await _run_shodan_scan(scan_option, interaction)
+        content = _compose_content(_trim_discord_message(result), self.session)
+        await interaction.edit_original_response(
+            content=content,
+            view=ConfigureView(self.session),
+        )
+
+
+class ConfigureView(discord.ui.View):
+    def __init__(self, session: MenuSession):
+        super().__init__(timeout=300)
+        self.session = session
+        self.add_item(ConfigureSelect(session))
+
+
 class TopMenuView(discord.ui.View):
     def __init__(self, session: MenuSession):
         super().__init__(timeout=300)
@@ -1232,7 +1333,10 @@ class TopMenuView(discord.ui.View):
 
     async def on_select(self, interaction: discord.Interaction) -> None:
         key = self.menu.values[0]
-        label = next((item.get("label") for item in TOP_LEVEL_OPTIONS if item.get("key") == key), key)
+        label = next(
+            (item.get("label") for item in TOP_LEVEL_OPTIONS if item.get("key") == key),
+            key,
+        )
         self.session.top_key = key
         self.session.log(f"Selected top-level menu: {label}")
 
@@ -1242,20 +1346,43 @@ class TopMenuView(discord.ui.View):
             )
             return
 
-        if key not in PROVIDER_OPTIONS:
-            await _update_menu_message(
+        # launcher.py now makes these direct actions, rather than defining
+        # PROVIDER_OPTIONS submenus. Match that behavior in Discord.
+        direct_modes = {
+            "chat": ("Ollama", "llm-ollama"),
+            "imagine": ("InvokeAI", "image-invokeai"),
+        }
+        if key in direct_modes:
+            provider_label, mode = direct_modes[key]
+            await _show_endpoint_menu(
                 interaction,
-                _compose_content("That menu isn't available yet.", self.session),
-                self,
+                self.session,
+                provider_label,
+                mode,
             )
             return
 
-        view = discord.ui.View(timeout=300)
-        view.add_item(ProviderSelect(key, self.session))
-        content = _compose_content(
-            f"You picked **{label}**. Choose an action below:", self.session
+        if key == "configure":
+            content = _compose_content("Configure TerminalAI:", self.session)
+            await _update_menu_message(interaction, content, ConfigureView(self.session))
+            return
+
+        # Compatibility with an older launcher.py that still defines provider
+        # submenus, including any custom additions the user may have made.
+        if key in PROVIDER_OPTIONS:
+            view = discord.ui.View(timeout=300)
+            view.add_item(ProviderSelect(key, self.session))
+            content = _compose_content(
+                f"You picked **{label}**. Choose an action below:", self.session
+            )
+            await _update_menu_message(interaction, content, view)
+            return
+
+        await _update_menu_message(
+            interaction,
+            _compose_content("That menu isn't available yet.", self.session),
+            self,
         )
-        await _update_menu_message(interaction, content, view)
 
 
 class TerminalAIDiscord(commands.Bot):
