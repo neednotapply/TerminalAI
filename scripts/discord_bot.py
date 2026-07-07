@@ -425,7 +425,18 @@ async def _run_shodan_scan(option: dict, interaction: discord.Interaction) -> st
     """Execute a Shodan scan action and return a trimmed result string."""
 
     script_path = _working_directory() / option["script"]
-    cmd = [sys.executable, str(script_path)] + option.get("extra_args", [])
+    # Discord scans should prioritize fresh discovery. Existing endpoints are
+    # refreshed by normal CLI scans; doing that here wastes the interaction
+    # window before new Shodan candidates are reached.
+    cmd = [
+        sys.executable,
+        str(script_path),
+        *option.get("extra_args", []),
+        "--limit",
+        "3",
+        "--existing-limit",
+        "0",
+    ]
     process = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(_working_directory()),
@@ -433,7 +444,7 @@ async def _run_shodan_scan(option: dict, interaction: discord.Interaction) -> st
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
     except asyncio.TimeoutError:
         process.kill()
         return "Scan timed out before completing."
@@ -479,6 +490,28 @@ def _mode_from_args(extra_args: List[str]) -> Optional[str]:
     return None
 
 
+def _is_selectable_endpoint(row: dict) -> bool:
+    """Return whether a CSV row is suitable for the Discord server picker.
+
+    Legacy/manual CSV rows that do not contain status fields remain selectable.
+    Rows produced by the scanner must be both verified and active.
+    """
+
+    def truthy(value: object) -> bool:
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
+
+    verified = row.get("verified")
+    active = row.get("is_active")
+    has_verified_status = verified is not None and str(verified).strip() != ""
+    has_active_status = active is not None and str(active).strip() != ""
+
+    if has_verified_status and not truthy(verified):
+        return False
+    if has_active_status and not truthy(active):
+        return False
+    return True
+
+
 def _load_endpoints(mode: str) -> List[dict]:
     """Load endpoints CSV rows for a given mode, falling back to examples."""
 
@@ -504,7 +537,8 @@ def _load_endpoints(mode: str) -> List[dict]:
         with csv_path.open("r", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                rows.append(row)
+                if _is_selectable_endpoint(row):
+                    rows.append(row)
     except OSError:
         return []
     return rows
@@ -533,9 +567,37 @@ def _context_is_available(chat: ChatContext) -> bool:
     return any(_matches(endpoint) for endpoint in endpoints)
 
 
+def _fetch_ollama_models(chat: ChatContext) -> List[str]:
+    """Fetch installed Ollama models from its native API."""
+
+    base_url = chat.base_url
+    if not base_url:
+        return []
+
+    try:
+        response = requests.get(f"{base_url}/api/tags", timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError):
+        return []
+
+    models: List[str] = []
+    for item in payload.get("models", []):
+        if isinstance(item, dict):
+            candidate = item.get("name") or item.get("model") or item.get("id")
+        else:
+            candidate = str(item)
+        if candidate:
+            models.append(str(candidate))
+
+    return [model for model in models if model]
+
+
 def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
     chat.board_error = None
     chat.board_notice = None
+    if chat.mode == "llm-ollama":
+        return _fetch_ollama_models(chat)
     if chat.mode == "image-invokeai":
         return _fetch_invoke_models(chat)
 

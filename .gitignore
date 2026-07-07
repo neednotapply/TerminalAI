@@ -6,3 +6,5 @@ data/invoke.endpoints.csv
 data/model_capabilities.json
 /data/images
 data/menu_state.json
+scripts/discord_bot.py.bak.terminalai-scanfix
+scripts/shodanscan.py.bak.terminalai-scanfix

@@ -80,19 +80,50 @@ CSV_PATHS = {
     "automatic1111": AUTOMATIC1111_CSV_PATH,
 }
 CONFIG_PATH = DATA_DIR / "config.json"
+# Each result is still live-validated before it becomes selectable. Multiple
+# targeted signatures improve recall when a UI banner/title changes or a host
+# exposes a different product page than older Shodan snapshots.
 SHODAN_QUERIES = [
+    # Ollama
     {
         "query": 'http.html:"Ollama is running" port:11434',
         "api_type": "ollama",
         "default_port": 11434,
     },
     {
-        "query": 'title:"Invoke - Community Edition"',
+        "query": 'http.title:"Ollama" port:11434',
+        "api_type": "ollama",
+        "default_port": 11434,
+    },
+    {
+        "query": 'http.html:"Ollama" port:11434',
+        "api_type": "ollama",
+        "default_port": 11434,
+    },
+    # InvokeAI
+    {
+        "query": 'http.title:"Invoke - Community Edition" port:9090',
         "api_type": "invokeai",
         "default_port": 9090,
     },
     {
-        "query": 'title:"Stable Diffusion web UI"',
+        "query": 'http.title:"InvokeAI" port:9090',
+        "api_type": "invokeai",
+        "default_port": 9090,
+    },
+    {
+        "query": 'http.html:"InvokeAI" port:9090',
+        "api_type": "invokeai",
+        "default_port": 9090,
+    },
+    # Automatic1111
+    {
+        "query": 'http.title:"Stable Diffusion web UI" port:7860',
+        "api_type": "automatic1111",
+        "default_port": 7860,
+    },
+    {
+        "query": 'http.html:"AUTOMATIC1111" port:7860',
         "api_type": "automatic1111",
         "default_port": 7860,
     },
@@ -616,6 +647,8 @@ def update_existing(api, df, batch_size, api_type):
         df.at[idx, "ping"] = latency if latency is not None else pd.NA
         if latency is None:
             df.at[idx, "is_active"] = False
+            df.at[idx, "verified"] = 0
+            df.at[idx, "verification_date"] = ""
             df.at[idx, "inactive_reason"] = "ping timeout"
             if "available_models" in df.columns:
                 df.at[idx, "available_models"] = ""
@@ -633,6 +666,8 @@ def update_existing(api, df, batch_size, api_type):
         else:
             api_ok, reason, models = check_ollama_api(ip, port, hostname=hostname)
         df.at[idx, "is_active"] = api_ok
+        df.at[idx, "verified"] = int(api_ok)
+        df.at[idx, "verification_date"] = now if api_ok else ""
         df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
         if "available_models" in df.columns:
             df.at[idx, "available_models"] = ";".join(models)
@@ -703,9 +738,13 @@ def find_new(api, df, query_info, limit):
     new_df = ensure_columns(pd.DataFrame(new_rows), api_type)
     for idx, row in new_df.iterrows():
         latency = ping_time(row["ip"], row["port"])
+        checked_at = utc_now()
+        new_df.at[idx, "last_check_date"] = checked_at
         if latency is None:
             new_df.at[idx, "ping"] = pd.NA
             new_df.at[idx, "is_active"] = False
+            new_df.at[idx, "verified"] = 0
+            new_df.at[idx, "verification_date"] = ""
             new_df.at[idx, "inactive_reason"] = "ping timeout"
             if "available_models" in new_df.columns:
                 new_df.at[idx, "available_models"] = ""
@@ -725,6 +764,8 @@ def find_new(api, df, query_info, limit):
                 )
             new_df.at[idx, "ping"] = latency
             new_df.at[idx, "is_active"] = api_ok
+            new_df.at[idx, "verified"] = int(api_ok)
+            new_df.at[idx, "verification_date"] = checked_at if api_ok else ""
             new_df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
             if "available_models" in new_df.columns:
                 new_df.at[idx, "available_models"] = ";".join(models)
@@ -798,10 +839,19 @@ def main():
             continue
         logging.info("Processing %s endpoints", api_type)
         df = load_dataframe(api_type)
-        if not df.empty and "last_check_date" in df.columns:
+        existing_count = len(df)
+
+        # Discovery comes first so interactive callers reach fresh sources
+        # before routine maintenance work. Existing rows are refreshed only
+        # after the Shodan queries have completed.
+        for info in query_infos:
+            df = find_new(api, df, info, args.limit)
+
+        if args.existing_limit > 0 and existing_count > 0 and "last_check_date" in df.columns:
             logging.info("Updating existing %s endpoints", api_type)
             oldest_idx = (
-                df.sort_values(by="last_check_date")
+                df.iloc[:existing_count]
+                .sort_values(by="last_check_date")
                 .head(args.existing_limit)
                 .index
             )
@@ -809,11 +859,10 @@ def main():
                 api, df.loc[oldest_idx].copy(), args.existing_limit, api_type
             )
             logging.info("Finished updating %s endpoints", api_type)
-        else:
+        elif existing_count == 0:
             logging.info("No existing %s endpoints to update", api_type)
-
-        for info in query_infos:
-            df = find_new(api, df, info, args.limit)
+        else:
+            logging.info("Skipping existing %s endpoint refresh", api_type)
 
         columns = COLUMN_ORDER.get(api_type, BASE_COLUMNS)
         df = df[columns]
