@@ -1,3 +1,3 @@
-"""TerminalAI scripts package."""
+"""BorrowedCompute scripts package."""
 
 __all__ = []

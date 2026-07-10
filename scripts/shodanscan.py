@@ -12,6 +12,7 @@ import socket
 import time
 import requests
 import urllib3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.exceptions import InsecureRequestWarning
 
 try:
@@ -86,44 +87,64 @@ CONFIG_PATH = DATA_DIR / "config.json"
 SHODAN_QUERIES = [
     # Ollama
     {
-        "query": 'http.html:"Ollama is running" port:11434',
+        "query": 'http.html:"Ollama is running"',
         "api_type": "ollama",
         "default_port": 11434,
     },
     {
-        "query": 'http.title:"Ollama" port:11434',
+        "query": 'http.title:"Ollama"',
         "api_type": "ollama",
         "default_port": 11434,
     },
     {
-        "query": 'http.html:"Ollama" port:11434',
+        "query": 'port:11434 product:"Ollama"',
         "api_type": "ollama",
         "default_port": 11434,
     },
     # InvokeAI
     {
-        "query": 'http.title:"Invoke - Community Edition" port:9090',
+        "query": 'http.title:"Invoke - Community Edition"',
         "api_type": "invokeai",
         "default_port": 9090,
     },
     {
-        "query": 'http.title:"InvokeAI" port:9090',
+        "query": 'http.html:"InvokeAI"',
         "api_type": "invokeai",
         "default_port": 9090,
     },
     {
-        "query": 'http.html:"InvokeAI" port:9090',
+        "query": 'http.html:"invoke-favicon"',
+        "api_type": "invokeai",
+        "default_port": 9090,
+    },
+    {
+        "query": 'port:9090 http.html:"Invoke"',
+        "api_type": "invokeai",
+        "default_port": 9090,
+    },
+    {
+        "query": 'port:9090 "Invoke"',
         "api_type": "invokeai",
         "default_port": 9090,
     },
     # Automatic1111
     {
-        "query": 'http.title:"Stable Diffusion web UI" port:7860',
+        "query": 'http.title:"Stable Diffusion web UI"',
         "api_type": "automatic1111",
         "default_port": 7860,
     },
     {
-        "query": 'http.html:"AUTOMATIC1111" port:7860',
+        "query": 'http.html:"AUTOMATIC1111"',
+        "api_type": "automatic1111",
+        "default_port": 7860,
+    },
+    {
+        "query": 'http.html:"Stable Diffusion WebUI"',
+        "api_type": "automatic1111",
+        "default_port": 7860,
+    },
+    {
+        "query": 'http.html:"txt2img"',
         "api_type": "automatic1111",
         "default_port": 7860,
     },
@@ -140,6 +161,8 @@ BASE_COLUMNS = [
     "inactive_reason",
     "last_check_date",
     "api_type",
+    "scheme",
+    "api_host",
     "hostnames",
     "org",
     "isp",
@@ -297,26 +320,63 @@ def extract_primary_hostname(value):
     return str(value).strip() or None
 
 
-def check_ollama_api(ip, port, hostname=None):
-    """Check that the Ollama API responds on the given host and port."""
-    url = f"http://{ip}:{port}/api/tags"
+def _connection_candidates(ip, port, hostname=None):
+    """Yield URL targets in the order most likely to match the scanned service."""
+
+    hosts = []
+    if hostname:
+        hosts.append(str(hostname).strip())
+    hosts.append(str(ip).strip())
+    hosts = list(dict.fromkeys(host for host in hosts if host))
+
     try:
-        headers = {"Host": hostname} if hostname else None
-        r = requests.get(url, timeout=2, headers=headers)
-        if r.status_code == 200:
+        numeric_port = int(port)
+    except (TypeError, ValueError):
+        numeric_port = 0
+    schemes = ("https", "http") if numeric_port in {443, 8443, 9443} else ("http", "https")
+
+    for host in hosts:
+        for scheme in schemes:
+            yield scheme, host
+
+
+def _check_result(ok, reason, models, connection, return_connection):
+    result = (ok, reason, models)
+    return (*result, connection) if return_connection else result
+
+
+def check_ollama_api(ip, port, hostname=None, *, return_connection=False):
+    """Check that the Ollama API responds on the given host and port."""
+
+    last_error = ""
+    for scheme, host in _connection_candidates(ip, port, hostname):
+        url = f"{scheme}://{host}:{port}/api/tags"
+        try:
+            r = requests.get(url, timeout=5)
+            r.raise_for_status()
             try:
                 data = r.json()
+                raw_models = data.get("models") if isinstance(data, dict) else None
+                if not isinstance(raw_models, list):
+                    last_error = "invalid /api/tags response"
+                    continue
                 models = [
                     m.get("name") or m.get("model") or m.get("id")
-                    for m in data.get("models", [])
+                    for m in raw_models
+                    if isinstance(m, dict)
                 ]
                 models = [m for m in models if m]
-            except Exception:
-                models = []
-            return True, "", models
-        return False, f"http {r.status_code}", []
-    except requests.RequestException as e:
-        return False, str(e), []
+            except (TypeError, ValueError):
+                last_error = "invalid JSON from /api/tags"
+                continue
+            if not models:
+                last_error = "Ollama server has no installed models"
+                continue
+            connection = {"scheme": scheme, "api_host": host}
+            return _check_result(True, "", models, connection, return_connection)
+        except requests.RequestException as exc:
+            last_error = str(exc)
+    return _check_result(False, last_error or "Ollama API check failed", [], None, return_connection)
 
 
 def _parse_invoke_models(payload):
@@ -351,6 +411,9 @@ def _parse_invoke_models(payload):
                     or item.get("key")
                     or item.get("model_name")
                 )
+                if not name:
+                    continue
+                name = str(name).strip()
                 if not name:
                     continue
                 base = (
@@ -458,130 +521,159 @@ def _discover_invoke_model_endpoints(
     return discovered
 
 
-def check_invoke_api(ip, port, hostname=None):
+def _is_invoke_openapi(base: str, headers: Optional[Dict[str, str]], verify: bool) -> bool:
+    """Confirm the FastAPI application identifies itself as InvokeAI."""
+
+    for suffix in ("/openapi.json", "/docs/openapi.json"):
+        try:
+            response = requests.get(
+                f"{base}{suffix}", timeout=5, headers=headers, verify=verify
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        info = payload.get("info")
+        title = info.get("title") if isinstance(info, dict) else ""
+        paths = payload.get("paths")
+        if (
+            isinstance(title, str)
+            and "invoke" in title.lower()
+            and isinstance(paths, dict)
+            and "/api/v1/app/version" in paths
+        ):
+            return True
+    return False
+
+
+def check_invoke_api(ip, port, hostname=None, *, return_connection=False):
     """Check that the InvokeAI API responds and gather available models."""
 
     last_error = ""
-    targets = []
+    for scheme, target in _connection_candidates(ip, port, hostname):
+        verify_tls = True
+        headers = None
+        base = f"{scheme}://{target}:{port}"
+        version_url = f"{base}/api/v1/app/version"
 
-    if hostname:
-        targets.append((hostname, {"Host": hostname}))
+        try:
+            r = requests.get(
+                version_url,
+                timeout=5,
+                headers=headers,
+                verify=verify_tls,
+            )
+            r.raise_for_status()
+        except requests.RequestException as e:
+            last_error = str(e)
+            continue
 
-    # Always fall back to the raw IP in case DNS for the hostname no longer
-    # resolves to the scanned address.
-    targets.append((ip, None))
+        if not _is_invoke_openapi(base, headers, verify_tls):
+            last_error = "API does not identify itself as InvokeAI"
+            continue
 
-    for scheme in ("http", "https"):
-        verify_tls = scheme != "https"
+        model_candidates = _discover_invoke_model_endpoints(base, headers, verify_tls)
+        model_candidates.extend(STATIC_MODEL_ENDPOINTS)
 
-        for target, headers in targets:
-            base = f"{scheme}://{target}:{port}"
-            version_url = f"{base}/api/v1/app/version"
+        seen_candidates: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
 
+        for path, params in model_candidates:
+            normalized_path = path if path.startswith("/") else f"/{path}"
+            param_items = tuple(sorted(params.items())) if params else tuple()
+            key = (normalized_path, param_items)
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+
+            url = f"{base}{normalized_path}"
             try:
-                r = requests.get(
-                    version_url,
+                resp = requests.get(
+                    url,
+                    params=params,
                     timeout=5,
                     headers=headers,
                     verify=verify_tls,
                 )
-                r.raise_for_status()
-            except requests.RequestException as e:
-                last_error = str(e)
-                continue
-
-            model_candidates: List[Tuple[str, Optional[Dict[str, Any]]]] = list(
-                STATIC_MODEL_ENDPOINTS
-            )
-            model_candidates.extend(
-                _discover_invoke_model_endpoints(base, headers, verify_tls)
-            )
-
-            seen_candidates: set[Tuple[str, Tuple[Tuple[str, Any], ...]]] = set()
-
-            for path, params in model_candidates:
-                normalized_path = path if path.startswith("/") else f"/{path}"
-                param_items = tuple(sorted(params.items())) if params else tuple()
-                key = (normalized_path, param_items)
-                if key in seen_candidates:
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status == 404:
                     continue
-                seen_candidates.add(key)
+                last_error = str(exc)
+                break
+            except requests.RequestException as exc:
+                last_error = str(exc)
+                break
 
-                url = f"{base}{normalized_path}"
-                try:
-                    resp = requests.get(
-                        url,
-                        params=params,
-                        timeout=5,
-                        headers=headers,
-                        verify=verify_tls,
-                    )
-                    resp.raise_for_status()
-                except requests.HTTPError as exc:
-                    status = (
-                        exc.response.status_code
-                        if exc.response is not None
-                        else None
-                    )
-                    if status == 404:
-                        continue
-                    last_error = str(exc)
-                    break
-                except requests.RequestException as exc:
-                    last_error = str(exc)
-                    break
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = None
 
-                try:
-                    payload = resp.json()
-                except ValueError:
-                    payload = None
+            models = _parse_invoke_models(payload)
+            if models:
+                connection = {"scheme": scheme, "api_host": target}
+                return _check_result(True, "", models, connection, return_connection)
+        last_error = "InvokeAI models fetch failed: no compatible endpoint"
 
-                models = _parse_invoke_models(payload)
-                if models:
-                    return True, "", models
-            else:
-                return True, "models fetch failed: no compatible endpoint", []
-
-    return False, last_error or "version check failed", []
+    return _check_result(False, last_error or "version check failed", [], None, return_connection)
 
 
-def check_automatic1111_api(ip, port, hostname=None):
+def check_automatic1111_api(ip, port, hostname=None, *, return_connection=False):
     """Check that the Automatic1111 API responds and gather available models."""
-
-    candidates: List[str] = []
-    if hostname:
-        candidates.append(str(hostname))
-    candidates.append(str(ip))
 
     last_error = ""
     tried: set[Tuple[str, str]] = set()
 
-    for target in candidates:
-        for scheme in ("http", "https"):
-            key = (target, scheme)
-            if key in tried:
-                continue
-            tried.add(key)
+    for scheme, target in _connection_candidates(ip, port, hostname):
+        key = (target, scheme)
+        if key in tried:
+            continue
+        tried.add(key)
 
-            client = Automatic1111Client(target, int(port), nickname=target, scheme=scheme)
-            try:
-                models = client.list_models()
-            except requests.exceptions.SSLError as exc:
-                last_error = str(exc)
-                continue
-            except (Automatic1111ClientError, requests.RequestException) as exc:
-                last_error = str(exc)
-                continue
+        client = Automatic1111Client(target, int(port), nickname=target, scheme=scheme)
+        try:
+            models = client.list_models()
+        except requests.exceptions.SSLError as exc:
+            last_error = str(exc)
+            continue
+        except (Automatic1111ClientError, requests.RequestException) as exc:
+            last_error = str(exc)
+            continue
 
-            names: List[str] = []
-            for model in models:
-                title = getattr(model, "title", "") or getattr(model, "name", "")
-                if title:
-                    names.append(str(title))
+        names: List[str] = []
+        for model in models:
+            title = getattr(model, "title", "") or getattr(model, "name", "")
+            if title:
+                names.append(str(title))
 
-            return True, "", names
+        connection = {"scheme": scheme, "api_host": target}
+        return _check_result(True, "", names, connection, return_connection)
 
-    return False, last_error or "model query failed", []
+    return _check_result(False, last_error or "model query failed", [], None, return_connection)
+
+
+def verify_endpoint(api_type, ip, port, hostname=None):
+    """Validate an endpoint and return the exact connection that succeeded."""
+
+    if api_type == "invokeai":
+        return check_invoke_api(ip, port, hostname=hostname, return_connection=True)
+    if api_type == "automatic1111":
+        return check_automatic1111_api(
+            ip, port, hostname=hostname, return_connection=True
+        )
+    return check_ollama_api(ip, port, hostname=hostname, return_connection=True)
+
+
+def _store_connection(df, idx, connection):
+    if isinstance(connection, dict):
+        df.at[idx, "scheme"] = connection.get("scheme", "")
+        df.at[idx, "api_host"] = connection.get("api_host", "")
+    else:
+        df.at[idx, "scheme"] = ""
+        df.at[idx, "api_host"] = ""
 
 
 def update_existing(api, df, batch_size, api_type):
@@ -657,20 +749,16 @@ def update_existing(api, df, batch_size, api_type):
         hostname = extract_primary_hostname(
             df.at[idx, "hostnames"] if "hostnames" in df.columns else None
         )
-        if api_type == "invokeai":
-            api_ok, reason, models = check_invoke_api(ip, port, hostname=hostname)
-        elif api_type == "automatic1111":
-            api_ok, reason, models = check_automatic1111_api(
-                ip, port, hostname=hostname
-            )
-        else:
-            api_ok, reason, models = check_ollama_api(ip, port, hostname=hostname)
+        api_ok, reason, models, connection = verify_endpoint(
+            api_type, ip, port, hostname=hostname
+        )
         df.at[idx, "is_active"] = api_ok
         df.at[idx, "verified"] = int(api_ok)
         df.at[idx, "verification_date"] = now if api_ok else ""
         df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
         if "available_models" in df.columns:
             df.at[idx, "available_models"] = ";".join(models)
+        _store_connection(df, idx, connection)
     return df
 
 
@@ -716,6 +804,8 @@ def find_new(api, df, query_info, limit):
                 "inactive_reason": "",
                 "last_check_date": scan_date,
                 "api_type": api_type,
+                "scheme": "",
+                "api_host": "",
                 "hostnames": ";".join(r.get("hostnames", [])),
                 "org": org,
                 "isp": r.get("isp", ""),
@@ -736,32 +826,27 @@ def find_new(api, df, query_info, limit):
         return df
 
     new_df = ensure_columns(pd.DataFrame(new_rows), api_type)
-    for idx, row in new_df.iterrows():
+
+    def validate_row(idx, row):
         latency = ping_time(row["ip"], row["port"])
         checked_at = utc_now()
-        new_df.at[idx, "last_check_date"] = checked_at
         if latency is None:
-            new_df.at[idx, "ping"] = pd.NA
-            new_df.at[idx, "is_active"] = False
-            new_df.at[idx, "verified"] = 0
-            new_df.at[idx, "verification_date"] = ""
-            new_df.at[idx, "inactive_reason"] = "ping timeout"
-            if "available_models" in new_df.columns:
-                new_df.at[idx, "available_models"] = ""
-        else:
-            hostname = extract_primary_hostname(row.get("hostnames"))
-            if api_type == "invokeai":
-                api_ok, reason, models = check_invoke_api(
-                    row["ip"], row["port"], hostname=hostname
-                )
-            elif api_type == "automatic1111":
-                api_ok, reason, models = check_automatic1111_api(
-                    row["ip"], row["port"], hostname=hostname
-                )
-            else:
-                api_ok, reason, models = check_ollama_api(
-                    row["ip"], row["port"], hostname=hostname
-                )
+            return idx, checked_at, latency, False, "ping timeout", [], None
+        hostname = extract_primary_hostname(row.get("hostnames"))
+        api_ok, reason, models, connection = verify_endpoint(
+            api_type, row["ip"], row["port"], hostname=hostname
+        )
+        return idx, checked_at, latency, api_ok, reason, models, connection
+
+    worker_count = max(1, min(16, len(new_df)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(validate_row, idx, row): idx
+            for idx, row in new_df.iterrows()
+        }
+        for future in as_completed(futures):
+            idx, checked_at, latency, api_ok, reason, models, connection = future.result()
+            new_df.at[idx, "last_check_date"] = checked_at
             new_df.at[idx, "ping"] = latency
             new_df.at[idx, "is_active"] = api_ok
             new_df.at[idx, "verified"] = int(api_ok)
@@ -769,6 +854,7 @@ def find_new(api, df, query_info, limit):
             new_df.at[idx, "inactive_reason"] = "" if api_ok else reason or "api error"
             if "available_models" in new_df.columns:
                 new_df.at[idx, "available_models"] = ";".join(models)
+            _store_connection(new_df, idx, connection)
 
     new_df["ping"] = pd.to_numeric(new_df["ping"], errors="coerce")
     new_df.sort_values(by="ping", inplace=True, na_position="last")

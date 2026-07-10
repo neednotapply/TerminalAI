@@ -50,9 +50,12 @@ def test_find_new_automatic1111_persists_models(tmp_path, monkeypatch):
 
     captured_calls = []
 
-    def fake_check(ip, port, hostname=None):
+    def fake_check(ip, port, hostname=None, *, return_connection=False):
         captured_calls.append((ip, port, hostname))
-        return True, "", ["SDXL Base", "SDXL Refiner"]
+        result = (True, "", ["SDXL Base", "SDXL Refiner"])
+        if return_connection:
+            return (*result, {"scheme": "https", "api_host": hostname})
+        return result
 
     monkeypatch.setattr(shodanscan, "ping_time", lambda ip, port: 25.5)
     monkeypatch.setattr(shodanscan, "check_automatic1111_api", fake_check)
@@ -73,6 +76,8 @@ def test_find_new_automatic1111_persists_models(tmp_path, monkeypatch):
     assert row["port"] == 7860
     assert bool(row["is_active"]) is True
     assert row["available_models"] == "SDXL Base;SDXL Refiner"
+    assert row["scheme"] == "https"
+    assert row["api_host"] == "diffusion.example.com"
 
     assert captured_calls == [("5.6.7.8", 7860, "diffusion.example.com")]
 
@@ -80,6 +85,60 @@ def test_find_new_automatic1111_persists_models(tmp_path, monkeypatch):
     contents = output_path.read_text(encoding="utf-8")
     assert "automatic1111" in contents
     assert "SDXL Base;SDXL Refiner" in contents
+
+
+def test_check_ollama_api_returns_working_hostname_and_scheme(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": [{"name": "llama3"}]}
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url != "https://ollama.example.com:443/api/tags":
+            raise shodanscan.requests.ConnectionError("not this route")
+        return FakeResponse()
+
+    monkeypatch.setattr(shodanscan.requests, "get", fake_get)
+
+    ok, reason, models, connection = shodanscan.check_ollama_api(
+        "1.2.3.4", 443, hostname="ollama.example.com", return_connection=True
+    )
+
+    assert ok is True
+    assert reason == ""
+    assert models == ["llama3"]
+    assert connection == {"scheme": "https", "api_host": "ollama.example.com"}
+    assert calls == ["https://ollama.example.com:443/api/tags"]
+
+
+def test_measured_image_queries_are_included():
+    queries = {entry["query"] for entry in shodanscan.SHODAN_QUERIES}
+
+    assert 'http.html:"invoke-favicon"' in queries
+    assert 'port:9090 "Invoke"' in queries
+    assert 'http.html:"Stable Diffusion WebUI"' in queries
+    assert 'http.html:"txt2img"' in queries
+
+
+def test_invoke_identity_requires_official_openapi_title(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "info": {"title": "Invoke - Community Edition"},
+                "paths": {"/api/v1/app/version": {"get": {}}},
+            }
+
+    monkeypatch.setattr(shodanscan.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+
+    assert shodanscan._is_invoke_openapi("http://example", None, True) is True
 
 
 def test_main_limits_to_selected_api(monkeypatch):

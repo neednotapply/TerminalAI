@@ -42,8 +42,8 @@ DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
 FLUX_DEFAULT_SCHEDULER = "flux-default"
 QUEUE_ID = "default"
-ORIGIN = "terminalai"
-DESTINATION = "terminalai"
+ORIGIN = "borrowedcompute"
+DESTINATION = "borrowedcompute"
 
 UNCATEGORIZED_BOARD_ID = "none"
 """Synthetic board id used for InvokeAI's Uncategorized images."""
@@ -307,10 +307,10 @@ class InvokeAIClient:
     ) -> Iterable[Tuple[str, Optional[Dict[str, Any]]]]:
         """Yield possible models endpoints, combining static and discovered paths."""
 
-        for path, params in STATIC_MODEL_ENDPOINTS:
+        for path, params in self._discover_model_endpoints(base_url):
             yield path, params
 
-        for path, params in self._discover_model_endpoints(base_url):
+        for path, params in STATIC_MODEL_ENDPOINTS:
             yield path, params
 
     def _discover_model_endpoints(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple launcher for TerminalAI utilities with cross-platform navigation."""
+"""Simple launcher for BorrowedCompute utilities with cross-platform navigation."""
 import os
 import subprocess
 import sys
@@ -12,41 +12,59 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 
 HEADER_LINES = [
-    "████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗      █████╗ ██╗",
-    "╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║     ██╔══██╗██║",
-    "   ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║     ███████║██║",
-    "   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║     ██╔══██║██║",
-    "   ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗██║  ██║██║",
-    "   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝",
+    r" ____   ___  ____  ____   _____        _______ ____  ",
+    r"| __ ) / _ \|  _ \|  _ \ / _ \ \      / / ____|  _ \ ",
+    r"|  _ \| | | | |_) | |_) | | | |\ \ /\ / /|  _| | | | |",
+    r"| |_) | |_| |  _ <|  _ <| |_| | \ V  V / | |___| |_| |",
+    r"|____/ \___/|_| \_\_| \_\\___/   \_/\_/  |_____|____/ ",
+    "",
+    r"  ____ ___  __  __ ____  _   _ _____ _____ ",
+    r" / ___/ _ \|  \/  |  _ \| | | |_   _| ____|",
+    r"| |  | | | | |\/| | |_) | | | | | | |  _|  ",
+    r"| |__| |_| | |  | |  __/| |_| | | | | |___ ",
+    r" \____\___/|_|  |_|_|    \___/  |_| |_____|",
 ]
 
 TOP_LEVEL_OPTIONS = [
     {
         "label": "Chat",
         "key": "chat",
-        "script": "TerminalAI.py",
+        "script": "BorrowedCompute.py",
         "extra_args": ["--mode", "chat"],
         "clear_before": False,
     },
     {
         "label": "Imagine",
         "key": "imagine",
-        "script": "TerminalAI.py",
+        "script": "BorrowedCompute.py",
         "extra_args": ["--mode", "imagine"],
         "clear_before": False,
     },
     {
         "label": "Configure",
         "key": "configure",
-        "script": "TerminalAI.py",
+        "script": "BorrowedCompute.py",
         "extra_args": ["--mode", "configure"],
         "clear_before": False,
     },
     {"label": "[Exit]", "key": "exit"},
 ]
 
-PROVIDER_OPTIONS = {}
-PROVIDER_HEADERS = {}
+PROVIDER_OPTIONS = {
+    "imagine": [
+        {
+            "label": "InvokeAI",
+            "script": "BorrowedCompute.py",
+            "extra_args": ["--mode", "image-invokeai"],
+        },
+        {
+            "label": "Automatic1111",
+            "script": "BorrowedCompute.py",
+            "extra_args": ["--mode", "image-automatic1111"],
+        },
+    ]
+}
+PROVIDER_HEADERS = {"imagine": "Select an image generator"}
 
 OPTIONS = [opt["label"] for opt in TOP_LEVEL_OPTIONS]
 DEBUG_FLAGS = {"--debug", "--verbose"}

@@ -21,7 +21,7 @@ sys.modules.setdefault("curses_nav", curses_nav_stub)
 
 sys.modules.setdefault("invoke_client", importlib.import_module("scripts.invoke_client"))
 
-import scripts.TerminalAI
+import scripts.BorrowedCompute
 from scripts.invoke_client import (
     DEFAULT_SCHEDULER,
     FLUX_DEFAULT_SCHEDULER,
@@ -110,11 +110,11 @@ class InvokeClientHealthTests(unittest.TestCase):
         self.assertEqual(mock_get.call_args_list, expected_calls)
 
     def test_check_invoke_api_returns_true_when_queue_unavailable(self):
-        with patch("scripts.TerminalAI.InvokeAIClient") as mock_client_cls:
+        with patch("scripts.BorrowedCompute.InvokeAIClient") as mock_client_cls:
             client_instance = mock_client_cls.return_value
             client_instance.check_health.return_value = {"version": "3.5.1", "queue_size": None}
 
-            result = scripts.TerminalAI.check_invoke_api(TEST_SERVER_IP, 9090)
+            result = scripts.BorrowedCompute.check_invoke_api(TEST_SERVER_IP, 9090)
 
         self.assertTrue(result)
         mock_client_cls.assert_called_once()
@@ -265,13 +265,13 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             scheduler="euler",
             seed=101,
             board_id="board-123",
-            board_name="TerminalAI",
+            board_name="BorrowedCompute",
         )
 
         nodes = info["graph"]["nodes"]
         self.assertEqual(
             nodes["save_image"].get("board"),
-            {"board_id": "board-123", "board_name": "TerminalAI"},
+            {"board_id": "board-123", "board_name": "BorrowedCompute"},
         )
         metadata = nodes["save_image"].get("metadata")
         self.assertEqual(metadata.get("prompt"), "galaxy horizon")
@@ -309,7 +309,7 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             scheduler="flux-default",
             seed=4242,
             board_id="board-flux",
-            board_name="TerminalAI",
+            board_name="BorrowedCompute",
         )
 
         self.assertEqual(info["graph"]["id"], "terminal_flux_graph")
@@ -331,7 +331,7 @@ class InvokeGraphBuilderTests(unittest.TestCase):
         self.assertEqual(metadata.get("scheduler"), "flux-default")
         self.assertEqual(
             nodes["save_image"].get("board"),
-            {"board_id": "board-flux", "board_name": "TerminalAI"},
+            {"board_id": "board-flux", "board_name": "BorrowedCompute"},
         )
 
         self.assertIn("negative_conditioning", nodes)
@@ -505,11 +505,11 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             scheduler="flowmatch",
             seed=4242,
             board_id="board-sd3",
-            board_name="TerminalAI",
+            board_name="BorrowedCompute",
         )
 
         nodes = info["graph"]["nodes"]
-        board_ref = {"board_id": "board-sd3", "board_name": "TerminalAI"}
+        board_ref = {"board_id": "board-sd3", "board_name": "BorrowedCompute"}
         self.assertEqual(nodes["denoise"].get("board"), board_ref)
         self.assertEqual(nodes["latents_to_image"].get("board"), board_ref)
 
@@ -532,17 +532,17 @@ class InvokeGraphBuilderTests(unittest.TestCase):
             scheduler="euler",
             seed=123,
             board_id="board-55",
-            board_name="TerminalAI",
+            board_name="BorrowedCompute",
         )
 
         self.assertEqual(seed_value, 123)
         batch = payload["batch"]
         self.assertEqual(batch["board_id"], "board-55")
-        self.assertEqual(batch["board_name"], "TerminalAI")
+        self.assertEqual(batch["board_name"], "BorrowedCompute")
         save_node_board = graph_info["graph"]["nodes"]["save_image"].get("board")
         self.assertEqual(
             save_node_board,
-            {"board_id": "board-55", "board_name": "TerminalAI"},
+            {"board_id": "board-55", "board_name": "BorrowedCompute"},
         )
         metadata = graph_info["graph"]["nodes"]["save_image"].get("metadata")
         self.assertEqual(metadata.get("prompt"), "forest")
@@ -689,7 +689,7 @@ class InvokeClientBatchStatusTests(unittest.TestCase):
             "status": "completed",
         }
         queue_entry = {"item_id": "queue-1", "status": "completed", "batch_id": batch_id}
-        board_entry = {"board_id": "board-1", "board_name": "TerminalAI"}
+        board_entry = {"board_id": "board-1", "board_name": "BorrowedCompute"}
         board_image = {
             "image_name": image_name,
             "batch_id": batch_id,
@@ -738,7 +738,7 @@ class InvokeClientBatchStatusTests(unittest.TestCase):
             status = self.client.get_batch_status(
                 batch_id,
                 include_preview=True,
-                board_name="TerminalAI",
+                board_name="BorrowedCompute",
             )
 
         self.assertEqual(status["status"], "completed")
@@ -784,16 +784,16 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             "requests.post",
             side_effect=error,
         ) as mock_post:
-            board_id = self.client.ensure_board("TerminalAI")
+            board_id = self.client.ensure_board("BorrowedCompute")
 
         self.assertEqual(board_id, "board-123")
         self.assertEqual(
             mock_fetch.call_args_list,
-            [call("TerminalAI"), call("TerminalAI")],
+            [call("BorrowedCompute"), call("BorrowedCompute")],
         )
         mock_post.assert_called_once_with(
             f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
-            json={"name": "TerminalAI", "board_name": "TerminalAI"},
+            json={"name": "BorrowedCompute", "board_name": "BorrowedCompute"},
             timeout=15,
         )
 
@@ -802,13 +802,13 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             "requests.post",
             return_value=DummyResponse({"id": "board-123"}),
         ) as mock_post:
-            board_id = self.client.ensure_board("TerminalAI")
+            board_id = self.client.ensure_board("BorrowedCompute")
 
         self.assertEqual(board_id, "board-123")
-        mock_fetch.assert_called_once_with("TerminalAI")
+        mock_fetch.assert_called_once_with("BorrowedCompute")
         mock_post.assert_called_once_with(
             f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
-            json={"name": "TerminalAI", "board_name": "TerminalAI"},
+            json={"name": "BorrowedCompute", "board_name": "BorrowedCompute"},
             timeout=15,
         )
 
@@ -830,22 +830,22 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
                 DummyResponse({"id": "board-456"}),
             ],
         ) as mock_post:
-            board_id = self.client.ensure_board("TerminalAI")
+            board_id = self.client.ensure_board("BorrowedCompute")
 
         self.assertEqual(board_id, "board-456")
-        mock_fetch.assert_called_once_with("TerminalAI")
+        mock_fetch.assert_called_once_with("BorrowedCompute")
         self.assertEqual(
             mock_post.call_args_list,
             [
                 call(
                     f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
-                    json={"name": "TerminalAI", "board_name": "TerminalAI"},
+                    json={"name": "BorrowedCompute", "board_name": "BorrowedCompute"},
                     timeout=15,
                 ),
                 call(
                     f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
-                    params={"board_name": "TerminalAI"},
-                    json={"name": "TerminalAI", "board_name": "TerminalAI"},
+                    params={"board_name": "BorrowedCompute"},
+                    json={"name": "BorrowedCompute", "board_name": "BorrowedCompute"},
                     timeout=15,
                 ),
             ],
@@ -856,13 +856,13 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             "requests.post",
             return_value=DummyResponse({"id": 314}),
         ) as mock_post:
-            board_id = self.client.ensure_board("TerminalAI")
+            board_id = self.client.ensure_board("BorrowedCompute")
 
         self.assertEqual(board_id, "314")
-        mock_fetch.assert_called_once_with("TerminalAI")
+        mock_fetch.assert_called_once_with("BorrowedCompute")
         mock_post.assert_called_once_with(
             f"http://{TEST_SERVER_IP}:9090/api/v1/boards/",
-            json={"name": "TerminalAI", "board_name": "TerminalAI"},
+            json={"name": "BorrowedCompute", "board_name": "BorrowedCompute"},
             timeout=15,
         )
 
@@ -882,14 +882,14 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
                     "items": [
                         {
                             "board_id": "board-999",
-                            "board_name": "TerminalAI",
+                            "board_name": "BorrowedCompute",
                         }
                     ]
                 }
             )
 
         with patch("requests.get", side_effect=fake_get) as mock_get:
-            board_id = self.client._fetch_board_id("TerminalAI")
+            board_id = self.client._fetch_board_id("BorrowedCompute")
 
         self.assertEqual(board_id, "board-999")
         self.assertEqual(
@@ -903,17 +903,17 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
         self.assertEqual(mock_get.call_count, 3)
 
     def test_fetch_board_id_allows_numeric_ids(self):
-        payload = {"items": [{"board_id": 99, "board_name": "TerminalAI"}]}
+        payload = {"items": [{"board_id": 99, "board_name": "BorrowedCompute"}]}
 
         with patch.object(self.client, "_fetch_boards_payload", return_value=payload) as mock_payload:
-            board_id = self.client._fetch_board_id("TerminalAI")
+            board_id = self.client._fetch_board_id("BorrowedCompute")
 
         self.assertEqual(board_id, "99")
         mock_payload.assert_called_once_with(strict=False)
 
     def test_list_boards_includes_numeric_ids(self):
         payload = [
-            {"board_id": 77, "board_name": "TerminalAI", "image_count": 5},
+            {"board_id": 77, "board_name": "BorrowedCompute", "image_count": 5},
             {"board_id": "UNASSIGNED", "board_name": "Uncategorized"},
         ]
 
@@ -921,9 +921,9 @@ class InvokeSchedulerDiscoveryTests(unittest.TestCase):
             boards = self.client.list_boards()
 
         board_names = {entry["name"]: entry for entry in boards}
-        self.assertIn("TerminalAI", board_names)
-        self.assertEqual(board_names["TerminalAI"]["id"], "77")
-        self.assertEqual(board_names["TerminalAI"].get("count"), 5)
+        self.assertIn("BorrowedCompute", board_names)
+        self.assertEqual(board_names["BorrowedCompute"]["id"], "77")
+        self.assertEqual(board_names["BorrowedCompute"].get("count"), 5)
         self.assertEqual(board_names["Uncategorized"]["id"], UNCATEGORIZED_BOARD_ID)
 
     def test_normalize_board_id_maps_uncategorized_synonyms(self):
@@ -1237,10 +1237,10 @@ class InvokeSubmissionTests(unittest.TestCase):
                 cfg_scale=7.5,
                 scheduler="euler",
                 seed=None,
-                board_name="TerminalAI",
+                board_name="BorrowedCompute",
             )
 
-        mock_board.assert_called_once_with("TerminalAI")
+        mock_board.assert_called_once_with("BorrowedCompute")
         mock_prepare.assert_called_once_with(
             model=model,
             prompt="nebula",
@@ -1252,7 +1252,7 @@ class InvokeSubmissionTests(unittest.TestCase):
             scheduler="euler",
             seed=None,
             board_id="board-99",
-            board_name="TerminalAI",
+            board_name="BorrowedCompute",
         )
 
     def test_submit_image_generation_uses_explicit_board_id(self):
@@ -1278,7 +1278,7 @@ class InvokeSubmissionTests(unittest.TestCase):
                 cfg_scale=8.0,
                 scheduler="euler",
                 seed=99,
-                board_name="TerminalAI",
+                board_name="BorrowedCompute",
                 board_id="board-explicit",
             )
 
@@ -1294,7 +1294,7 @@ class InvokeSubmissionTests(unittest.TestCase):
             scheduler="euler",
             seed=99,
             board_id="board-explicit",
-            board_name="TerminalAI",
+            board_name="BorrowedCompute",
         )
         self.assertEqual(result["seed"], 202)
 

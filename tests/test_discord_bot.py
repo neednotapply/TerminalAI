@@ -68,6 +68,23 @@ def test_format_imagine_caption_removes_extra_whitespace():
     assert caption == "@User imagined A cat on a mat."
 
 
+def test_extract_chat_content_supports_native_ollama_response():
+    payload = {"message": {"role": "assistant", "content": "Native reply"}}
+
+    assert discord_bot._extract_chat_content(payload) == "Native reply"
+
+
+def test_configure_image_menu_lists_both_providers():
+    session = discord_bot.MenuSession(user_id=123)
+    select = discord_bot.ConfigureImageSelect(session)
+
+    assert [option.label for option in select.options] == [
+        "InvokeAI",
+        "Automatic1111",
+        "[Back]",
+    ]
+
+
 def _reset_discord_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(discord_bot, "SESSIONS_PATH", tmp_path / "discord_sessions.json")
     discord_bot._persisted_state = {"contexts": {}, "sessions": {}}
@@ -182,14 +199,14 @@ def test_reset_session_clears_persisted_context(monkeypatch, tmp_path):
 
 
 def test_strip_bot_mention_handles_multiple_formats():
-    cleaned = discord_bot._strip_bot_mention("<@123> hi @TerminalAI", 123, "TerminalAI")
+    cleaned = discord_bot._strip_bot_mention("<@123> hi @BorrowedCompute", 123, "BorrowedCompute")
     assert cleaned == "hi"
 
 
 def test_reply_to_mention_uses_existing_chat_context(monkeypatch, tmp_path):
     _reset_discord_state(tmp_path, monkeypatch)
 
-    bot_user = SimpleNamespace(id=123, name="TerminalAI", display_name="TerminalAI")
+    bot_user = SimpleNamespace(id=123, name="BorrowedCompute", display_name="BorrowedCompute")
     chat = discord_bot.ChatContext(
         endpoint={"ip": "1.1.1.1", "port": "8000", "id": "server"},
         mode="llm-ollama",

@@ -11,10 +11,10 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import TerminalAI  # noqa: E402
+import BorrowedCompute  # noqa: E402
 
 
-class TerminalAIInvokeTests(unittest.TestCase):
+class BorrowedComputeInvokeTests(unittest.TestCase):
     def setUp(self):
         self.client = MagicMock()
         self.client.submit_image_generation = MagicMock()
@@ -28,7 +28,7 @@ class TerminalAIInvokeTests(unittest.TestCase):
     def test_invoke_generate_image_forwards_arguments(self):
         self.client.submit_image_generation.return_value = {"queue_item_id": "abc"}
 
-        result = TerminalAI._invoke_generate_image(
+        result = BorrowedCompute._invoke_generate_image(
             self.client,
             self.model,
             "  prompt text  ",
@@ -52,16 +52,16 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=6.5,
             scheduler="custom_scheduler",
             seed=123,
-            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_name=BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME,
             board_id="board-123",
         )
-        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
+        self.client.ensure_board.assert_called_once_with(BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": "abc"})
 
     def test_invoke_generate_image_applies_defaults(self):
         self.client.submit_image_generation.return_value = {"queue_item_id": None}
 
-        result = TerminalAI._invoke_generate_image(
+        result = BorrowedCompute._invoke_generate_image(
             self.client,
             self.model,
             "Prompt",
@@ -83,19 +83,19 @@ class TerminalAIInvokeTests(unittest.TestCase):
             height=640,
             steps=30,
             cfg_scale=7.5,
-            scheduler=TerminalAI.DEFAULT_SCHEDULER,
+            scheduler=BorrowedCompute.DEFAULT_SCHEDULER,
             seed=None,
-            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_name=BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME,
             board_id="board-123",
         )
-        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
+        self.client.ensure_board.assert_called_once_with(BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": None})
 
     def test_invoke_generate_image_uses_flux_default_scheduler(self):
         self.client.submit_image_generation.return_value = {"queue_item_id": "flux"}
         flux_model = InvokeAIModel(name="flux", base="flux", key=None, raw={})
 
-        result = TerminalAI._invoke_generate_image(
+        result = BorrowedCompute._invoke_generate_image(
             self.client,
             flux_model,
             "Prompt",
@@ -119,17 +119,17 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=7.5,
             scheduler=FLUX_DEFAULT_SCHEDULER,
             seed=None,
-            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_name=BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME,
             board_id="board-123",
         )
-        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
+        self.client.ensure_board.assert_called_once_with(BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": "flux"})
 
     def test_invoke_generate_image_preserves_custom_flux_scheduler(self):
         self.client.submit_image_generation.return_value = {"queue_item_id": "flux-custom"}
         flux_model = InvokeAIModel(name="flux", base="flux", key=None, raw={})
 
-        result = TerminalAI._invoke_generate_image(
+        result = BorrowedCompute._invoke_generate_image(
             self.client,
             flux_model,
             "Prompt",
@@ -153,15 +153,15 @@ class TerminalAIInvokeTests(unittest.TestCase):
             cfg_scale=7.5,
             scheduler="flux-vpred",
             seed=None,
-            board_name=TerminalAI.TERMINALAI_BOARD_NAME,
+            board_name=BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME,
             board_id="board-123",
         )
-        self.client.ensure_board.assert_called_once_with(TerminalAI.TERMINALAI_BOARD_NAME)
+        self.client.ensure_board.assert_called_once_with(BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME)
         self.assertEqual(result, {"queue_item_id": "flux-custom"})
 
     def test_invoke_generate_image_requires_prompt(self):
-        with self.assertRaises(TerminalAI.InvokeAIClientError):
-            TerminalAI._invoke_generate_image(
+        with self.assertRaises(BorrowedCompute.InvokeAIClientError):
+            BorrowedCompute._invoke_generate_image(
                 self.client,
                 self.model,
                 "   ",
@@ -178,8 +178,8 @@ class TerminalAIInvokeTests(unittest.TestCase):
     def test_invoke_generate_image_requires_board_id(self):
         self.client.ensure_board.return_value = ""
 
-        with self.assertRaises(TerminalAI.InvokeAIClientError):
-            TerminalAI._invoke_generate_image(
+        with self.assertRaises(BorrowedCompute.InvokeAIClientError):
+            BorrowedCompute._invoke_generate_image(
                 self.client,
                 self.model,
                 "Prompt",
@@ -194,10 +194,10 @@ class TerminalAIInvokeTests(unittest.TestCase):
             )
 
     def test_invoke_generate_image_rejects_uncategorized_board(self):
-        self.client.ensure_board.return_value = TerminalAI.UNCATEGORIZED_BOARD_ID
+        self.client.ensure_board.return_value = BorrowedCompute.UNCATEGORIZED_BOARD_ID
 
-        with self.assertRaises(TerminalAI.InvokeAIClientError):
-            TerminalAI._invoke_generate_image(
+        with self.assertRaises(BorrowedCompute.InvokeAIClientError):
+            BorrowedCompute._invoke_generate_image(
                 self.client,
                 self.model,
                 "Prompt",
@@ -211,14 +211,14 @@ class TerminalAIInvokeTests(unittest.TestCase):
                 30,
             )
 
-    def test_browse_board_images_rejects_terminalai_uncategorized_board(self):
+    def test_browse_board_images_rejects_borrowedcompute_uncategorized_board(self):
         board = {
-            "name": TerminalAI.TERMINALAI_BOARD_NAME,
-            "id": TerminalAI.UNCATEGORIZED_BOARD_ID,
+            "name": BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME,
+            "id": BorrowedCompute.UNCATEGORIZED_BOARD_ID,
         }
 
-        with patch.object(TerminalAI, "get_input", return_value=""):
-            TerminalAI._browse_board_images(self.client, board)
+        with patch.object(BorrowedCompute, "get_input", return_value=""):
+            BorrowedCompute._browse_board_images(self.client, board)
 
         self.client.list_board_images.assert_not_called()
         self.client.retrieve_board_image.assert_not_called()
@@ -249,18 +249,18 @@ class TerminalAIInvokeTests(unittest.TestCase):
         self.client.retrieve_board_image.return_value = retrieved_result
         self.client.get_cached_image_result.side_effect = cache_lookup
 
-        with patch.object(TerminalAI, "clear_screen"), patch.object(
-            TerminalAI, "_print_board_view_header"
+        with patch.object(BorrowedCompute, "clear_screen"), patch.object(
+            BorrowedCompute, "_print_board_view_header"
         ), patch.object(
-            TerminalAI, "_print_board_image_summary"
+            BorrowedCompute, "_print_board_image_summary"
         ), patch.object(
-            TerminalAI, "display_with_chafa"
+            BorrowedCompute, "display_with_chafa"
         ), patch.object(
-            TerminalAI, "get_input", return_value=""
+            BorrowedCompute, "get_input", return_value=""
         ), patch.object(
-            TerminalAI, "get_key", side_effect=["RIGHT", "ESC"]
+            BorrowedCompute, "get_key", side_effect=["RIGHT", "ESC"]
         ):
-            TerminalAI._browse_board_images(self.client, board)
+            BorrowedCompute._browse_board_images(self.client, board)
 
         self.client.retrieve_board_image.assert_called_once_with(
             image_info=entry_one, board_name="Board"
@@ -287,28 +287,28 @@ class TerminalAIInvokeTests(unittest.TestCase):
         monotonic_values = [0, 0, 1, 1]
 
         with patch("builtins.print") as mock_print, patch.object(
-            TerminalAI.time, "monotonic", side_effect=monotonic_values
-        ), patch.object(TerminalAI.time, "sleep") as mock_sleep:
-            status = TerminalAI._poll_invoke_batch_status(
+            BorrowedCompute.time, "monotonic", side_effect=monotonic_values
+        ), patch.object(BorrowedCompute.time, "sleep") as mock_sleep:
+            status = BorrowedCompute._poll_invoke_batch_status(
                 self.client, "batch-xyz", timeout=10, poll_interval=0
             )
 
         self.assertEqual(status, statuses[-1])
         self.assertEqual(self.client.get_batch_status.call_count, 2)
         self.client.get_batch_status.assert_called_with(
-            "batch-xyz", include_preview=True, board_name=TerminalAI.TERMINALAI_BOARD_NAME
+            "batch-xyz", include_preview=True, board_name=BorrowedCompute.BORROWEDCOMPUTE_BOARD_NAME
         )
         progress_calls = [call for call in mock_print.call_args_list if "Batch status:" in call.args[0]]
         self.assertGreaterEqual(len(progress_calls), 1)
         mock_sleep.assert_not_called()
 
     def test_poll_invoke_batch_status_handles_error(self):
-        self.client.get_batch_status.side_effect = TerminalAI.InvokeAIClientError("boom")
+        self.client.get_batch_status.side_effect = BorrowedCompute.InvokeAIClientError("boom")
 
         with patch("builtins.print") as mock_print, patch.object(
-            TerminalAI.time, "monotonic", side_effect=[0, 0]
+            BorrowedCompute.time, "monotonic", side_effect=[0, 0]
         ):
-            status = TerminalAI._poll_invoke_batch_status(
+            status = BorrowedCompute._poll_invoke_batch_status(
                 self.client, "batch-err", timeout=10, poll_interval=0
             )
 
@@ -321,26 +321,26 @@ class TerminalAIInvokeTests(unittest.TestCase):
         preview = {"path": Path("/tmp/preview.png"), "metadata": {}}
         polled_status = {"status": "completed", "preview": preview}
 
-        with patch.object(TerminalAI, "select_invoke_model", side_effect=[self.model, None]) as model_select_mock, patch.object(
-            TerminalAI, "clear_screen"
+        with patch.object(BorrowedCompute, "select_invoke_model", side_effect=[self.model, None]) as model_select_mock, patch.object(
+            BorrowedCompute, "clear_screen"
         ), patch.object(
-            TerminalAI, "_print_invoke_prompt_header"
+            BorrowedCompute, "_print_invoke_prompt_header"
         ), patch.object(
-            TerminalAI, "_invoke_generate_image", return_value={"queue_item_id": "q", "batch_id": "batch-1"}
+            BorrowedCompute, "_invoke_generate_image", return_value={"queue_item_id": "q", "batch_id": "batch-1"}
         ), patch.object(
-            TerminalAI, "_poll_invoke_batch_status", return_value=polled_status
+            BorrowedCompute, "_poll_invoke_batch_status", return_value=polled_status
         ) as poll_mock, patch.object(
-            TerminalAI, "_present_invoke_preview", return_value=None
+            BorrowedCompute, "_present_invoke_preview", return_value=None
         ) as present_mock, patch.object(
-            TerminalAI, "prompt_int", side_effect=[512, 512, 20]
+            BorrowedCompute, "prompt_int", side_effect=[512, 512, 20]
         ), patch.object(
-            TerminalAI, "prompt_float", return_value=7.5
+            BorrowedCompute, "prompt_float", return_value=7.5
         ), patch.object(
-            TerminalAI, "select_scheduler_option", return_value="scheduler"
+            BorrowedCompute, "select_scheduler_option", return_value="scheduler"
         ), patch.object(
-            TerminalAI, "get_input", side_effect=["Prompt", "", "", "ESC"]
+            BorrowedCompute, "get_input", side_effect=["Prompt", "", "", "ESC"]
         ):
-            TerminalAI._run_generation_flow(self.client, [self.model])
+            BorrowedCompute._run_generation_flow(self.client, [self.model])
 
         self.assertEqual(model_select_mock.call_count, 1)
         poll_mock.assert_called_once()

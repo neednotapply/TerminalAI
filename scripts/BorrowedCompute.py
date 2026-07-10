@@ -92,12 +92,12 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 AI_COLOR = "\033[32m"
 
-TERMINALAI_BOARD_NAME = "TerminalAI"
-TERMINALAI_BOARD_RESOLUTION_ERROR = (
-    f"Failed to resolve InvokeAI board '{TERMINALAI_BOARD_NAME}'"
+BORROWEDCOMPUTE_BOARD_NAME = "BorrowedCompute"
+BORROWEDCOMPUTE_BOARD_RESOLUTION_ERROR = (
+    f"Failed to resolve InvokeAI board '{BORROWEDCOMPUTE_BOARD_NAME}'"
 )
-TERMINALAI_BOARD_ID_ERROR_MESSAGE = (
-    f"InvokeAI server did not provide a valid id for board {TERMINALAI_BOARD_NAME}."
+BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE = (
+    f"InvokeAI server did not provide a valid id for board {BORROWEDCOMPUTE_BOARD_NAME}."
 )
 
 BATCH_STATUS_TIMEOUT = 120.0
@@ -118,7 +118,7 @@ def _normalize_board_id(board_id: Any) -> Optional[str]:
     return candidate or None
 
 
-def _is_valid_terminalai_board_id(board_id: Any) -> bool:
+def _is_valid_borrowedcompute_board_id(board_id: Any) -> bool:
     normalized = _normalize_board_id(board_id)
     return normalized is not None and normalized != UNCATEGORIZED_BOARD_ID
 
@@ -135,8 +135,8 @@ MODE_ALIASES = {
     "ollama": "llm-ollama",
     "llm": "llm",
     "llm-ollama": "llm-ollama",
-    "image": "image-invokeai",
-    "img": "image-invokeai",
+    "image": "image",
+    "img": "image",
     "invoke": "image-invokeai",
     "invokeai": "image-invokeai",
     "image-invokeai": "image-invokeai",
@@ -262,6 +262,8 @@ BASE_COLUMNS = [
     "inactive_reason",
     "last_check_date",
     "api_type",
+    "scheme",
+    "api_host",
     "hostnames",
     "org",
     "isp",
@@ -380,7 +382,7 @@ def _load_menu_state() -> None:
     if not isinstance(data, dict):
         return
 
-    for api_type in ("ollama", "invokeai"):
+    for api_type in ("ollama", "invokeai", "automatic1111"):
         entry = data.get(api_type)
         if not isinstance(entry, dict):
             continue
@@ -681,6 +683,59 @@ def describe_http_error(error: requests.HTTPError) -> str:
     if detail:
         return f"{message} - {detail}"
     return message
+
+
+def extract_chat_text(payload: Any) -> Optional[str]:
+    """Extract assistant text from native Ollama and OpenAI-compatible responses."""
+
+    if not isinstance(payload, dict):
+        return None
+
+    message = payload.get("message")
+    if isinstance(message, dict):
+        for key in ("content", "thinking"):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    elif isinstance(message, str) and message.strip():
+        return message
+
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            choice_message = first.get("message")
+            if isinstance(choice_message, dict):
+                for key in ("content", "thinking"):
+                    value = choice_message.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value
+            for key in ("text", "content"):
+                value = first.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+
+    for key in ("response", "completion", "content", "text", "thinking"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _get_preferred_automatic1111_model(
+    models: List[Automatic1111Model],
+) -> Optional[Automatic1111Model]:
+    entry = MENU_STATE.get("automatic1111")
+    if not isinstance(entry, dict):
+        return None
+    preferred = entry.get("model")
+    if not isinstance(preferred, str) or not preferred.strip():
+        return None
+    normalized = preferred.strip()
+    for model in models:
+        if normalized in {model.name, model.title}:
+            return model
+    return None
 
 
 def extract_embedding_vector(payload: Any) -> Optional[List[float]]:
@@ -1639,7 +1694,7 @@ def _poll_invoke_batch_status(
         now = time.monotonic()
         if now - start > timeout:
             print(
-                f"{YELLOW}Timed out waiting for batch {batch_id} to complete. Check the {TERMINALAI_BOARD_NAME} board for results.{RESET}"
+                f"{YELLOW}Timed out waiting for batch {batch_id} to complete. Check the {BORROWEDCOMPUTE_BOARD_NAME} board for results.{RESET}"
             )
             return last_status
 
@@ -1647,7 +1702,7 @@ def _poll_invoke_batch_status(
             status = client.get_batch_status(
                 batch_id,
                 include_preview=True,
-                board_name=TERMINALAI_BOARD_NAME,
+                board_name=BORROWEDCOMPUTE_BOARD_NAME,
             )
         except InvokeAIClientError as exc:
             print(f"{YELLOW}Failed to poll batch {batch_id}: {exc}{RESET}")
@@ -1658,7 +1713,7 @@ def _poll_invoke_batch_status(
 
         if not isinstance(status, dict):
             print(
-                f"{YELLOW}InvokeAI returned an unexpected batch status payload. Check the {TERMINALAI_BOARD_NAME} board for updates.{RESET}"
+                f"{YELLOW}InvokeAI returned an unexpected batch status payload. Check the {BORROWEDCOMPUTE_BOARD_NAME} board for updates.{RESET}"
             )
             return last_status
 
@@ -1702,7 +1757,7 @@ def _load_invoke_final_result(
     batch_id: str,
 ) -> Optional[Dict[str, Any]]:
     try:
-        board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+        board_id = client.ensure_board(BORROWEDCOMPUTE_BOARD_NAME)
     except InvokeAIClientError as exc:
         print(f"{YELLOW}Unable to load final image: {exc}{RESET}")
         return None
@@ -1710,8 +1765,8 @@ def _load_invoke_final_result(
         print(f"{YELLOW}Network error while loading final image: {exc}{RESET}")
         return None
 
-    if not _is_valid_terminalai_board_id(board_id):
-        print(f"{YELLOW}{TERMINALAI_BOARD_RESOLUTION_ERROR}.{RESET}")
+    if not _is_valid_borrowedcompute_board_id(board_id):
+        print(f"{YELLOW}{BORROWEDCOMPUTE_BOARD_RESOLUTION_ERROR}.{RESET}")
         return None
 
     try:
@@ -1803,7 +1858,7 @@ def _load_invoke_final_result(
             try:
                 return client.retrieve_board_image(
                     image_info=candidate,
-                    board_name=TERMINALAI_BOARD_NAME,
+                    board_name=BORROWEDCOMPUTE_BOARD_NAME,
                 )
             except InvokeAIClientError as exc:
                 print(f"{YELLOW}Failed to download final image: {exc}{RESET}")
@@ -1821,7 +1876,7 @@ def _load_invoke_final_result(
         try:
             return client.retrieve_board_image(
                 image_info=fallback_entry,
-                board_name=TERMINALAI_BOARD_NAME,
+                board_name=BORROWEDCOMPUTE_BOARD_NAME,
             )
         except InvokeAIClientError as exc:
             print(f"{YELLOW}Failed to download final image: {exc}{RESET}")
@@ -1856,10 +1911,10 @@ def _browse_board_images(client: InvokeAIClient, board: Dict[str, Any]) -> None:
         board_id = UNCATEGORIZED_BOARD_ID
 
     if (
-        board_name == TERMINALAI_BOARD_NAME
-        and not _is_valid_terminalai_board_id(board_id)
+        board_name == BORROWEDCOMPUTE_BOARD_NAME
+        and not _is_valid_borrowedcompute_board_id(board_id)
     ):
-        print(f"{RED}{TERMINALAI_BOARD_ID_ERROR_MESSAGE}{RESET}")
+        print(f"{RED}{BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE}{RESET}")
         get_input(f"{CYAN}Press Enter to return{RESET}")
         return
 
@@ -2161,7 +2216,7 @@ def _check_batch_status(client: InvokeAIClient) -> None:
             status = client.get_batch_status(
                 batch_id,
                 include_preview=True,
-                board_name=TERMINALAI_BOARD_NAME,
+                board_name=BORROWEDCOMPUTE_BOARD_NAME,
             )
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
@@ -2340,7 +2395,7 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                 print(f"{CYAN}Queue item id: {queue_id}{RESET}")
             else:
                 print(
-                    f"{YELLOW}Server did not return a queue item id. Check the {TERMINALAI_BOARD_NAME} board for the finished image.{RESET}"
+                    f"{YELLOW}Server did not return a queue item id. Check the {BORROWEDCOMPUTE_BOARD_NAME} board for the finished image.{RESET}"
                 )
             if batch_id:
                 print(f"{CYAN}Batch id: {batch_id}{RESET}")
@@ -2369,15 +2424,15 @@ def _run_generation_flow(client: InvokeAIClient, models: List[InvokeAIModel]) ->
                             print(f"{YELLOW}Preview unavailable: {preview_error}{RESET}")
                         elif _is_batch_complete(polled_status):
                             print(
-                                f"{YELLOW}Batch {batch_id} completed without returning a preview. Check the {TERMINALAI_BOARD_NAME} board for the final image.{RESET}"
+                                f"{YELLOW}Batch {batch_id} completed without returning a preview. Check the {BORROWEDCOMPUTE_BOARD_NAME} board for the final image.{RESET}"
                             )
                     if not preview and final_result is None and not _is_batch_complete(polled_status):
                         print(
-                            f"{YELLOW}Batch {batch_id} is still processing. You can monitor progress on the {TERMINALAI_BOARD_NAME} board.{RESET}"
+                            f"{YELLOW}Batch {batch_id} is still processing. You can monitor progress on the {BORROWEDCOMPUTE_BOARD_NAME} board.{RESET}"
                         )
                 else:
                     print(
-                        f"{YELLOW}Unable to retrieve live status for batch {batch_id}. Check the {TERMINALAI_BOARD_NAME} board for updates.{RESET}"
+                        f"{YELLOW}Unable to retrieve live status for batch {batch_id}. Check the {BORROWEDCOMPUTE_BOARD_NAME} board for updates.{RESET}"
                     )
 
             acknowledgement = get_input(
@@ -2411,10 +2466,13 @@ def _run_automatic1111_flow(
 
     sampler_default = sampler_options[0]
 
+    preferred_model = _get_preferred_automatic1111_model(models)
     while True:
-        model = select_automatic1111_model(models)
+        model = preferred_model or select_automatic1111_model(models)
+        preferred_model = None
         if model is None:
             return
+        _remember_model_selection("automatic1111", model.title or model.name)
 
         try:
             client.set_active_model(model)
@@ -2545,9 +2603,9 @@ def _invoke_generate_image(
     if not prompt_text:
         raise InvokeAIClientError("Prompt must not be empty")
 
-    board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
-    if not _is_valid_terminalai_board_id(board_id):
-        raise InvokeAIClientError(TERMINALAI_BOARD_RESOLUTION_ERROR)
+    board_id = client.ensure_board(BORROWEDCOMPUTE_BOARD_NAME)
+    if not _is_valid_borrowedcompute_board_id(board_id):
+        raise InvokeAIClientError(BORROWEDCOMPUTE_BOARD_RESOLUTION_ERROR)
 
     negative_text = (negative_prompt or "").strip()
     scheduler_name = (scheduler or "").strip()
@@ -2569,7 +2627,7 @@ def _invoke_generate_image(
         cfg_scale=float(cfg_scale),
         scheduler=scheduler_name,
         seed=seed,
-        board_name=TERMINALAI_BOARD_NAME,
+        board_name=BORROWEDCOMPUTE_BOARD_NAME,
         board_id=board_id,
     )
 
@@ -2776,7 +2834,15 @@ def _configure_invokeai_model() -> None:
         get_input(f"{CYAN}Press Enter to continue{RESET}")
         return
 
-    client = InvokeAIClient(server["ip"], selected_port, server.get("nickname"), DATA_DIR)
+    host, scheme = connection_details(server, "invokeai")
+    client = InvokeAIClient(
+        host,
+        selected_port,
+        server.get("nickname"),
+        DATA_DIR,
+        scheme=scheme,
+        allow_https_fallback=False,
+    )
     try:
         models = client.list_models()
     except (InvokeAIClientError, requests.RequestException) as exc:
@@ -2803,8 +2869,85 @@ def _configure_invokeai_model() -> None:
     get_input(f"{CYAN}Press Enter to continue{RESET}")
 
 
+def _configure_automatic1111_model() -> None:
+    server = _get_configured_server_for_api("automatic1111", "Automatic1111")
+    if server is None:
+        return
+
+    selected_port = server.get("apis", {}).get("automatic1111")
+    if selected_port is None:
+        print(f"{RED}Selected server does not expose Automatic1111 API{RESET}")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    host, scheme = connection_details(server, "automatic1111")
+    client = Automatic1111Client(
+        host,
+        selected_port,
+        server.get("nickname"),
+        DATA_DIR,
+        scheme=scheme,
+    )
+    try:
+        models = client.list_models()
+    except (Automatic1111ClientError, requests.RequestException) as exc:
+        print(f"{RED}Failed to retrieve Automatic1111 models: {exc}{RESET}")
+        _forget_model_selection("automatic1111")
+        get_input(f"{CYAN}Press Enter to continue{RESET}")
+        return
+
+    preferred = _get_preferred_automatic1111_model(models)
+    if preferred is not None:
+        print(f"{GREEN}Current model: {preferred.title or preferred.name}{RESET}")
+
+    chosen = select_automatic1111_model(models)
+    if chosen is None:
+        return
+    _remember_model_selection("automatic1111", chosen.title or chosen.name)
+    print(f"{GREEN}Saved Automatic1111 model: {chosen.title or chosen.name}{RESET}")
+    get_input(f"{CYAN}Press Enter to continue{RESET}")
+
+
+def run_configure_chat_menu() -> None:
+    options = ["Ollama Server", "Ollama Model", "[Back]"]
+    while True:
+        selection = _prompt_selection("Configure Chat:", options)
+        if selection is None or selection == len(options) - 1:
+            return
+        clear_screen()
+        if selection == 0:
+            _configure_api_server("ollama", "Ollama")
+        elif selection == 1:
+            _configure_ollama_model()
+        clear_screen()
+
+
+def run_configure_image_menu() -> None:
+    options = [
+        "InvokeAI Server",
+        "InvokeAI Model",
+        "Automatic1111 Server",
+        "Automatic1111 Model",
+        "[Back]",
+    ]
+    while True:
+        selection = _prompt_selection("Configure Image Generation:", options)
+        if selection is None or selection == len(options) - 1:
+            return
+        clear_screen()
+        if selection == 0:
+            _configure_api_server("invokeai", "InvokeAI")
+        elif selection == 1:
+            _configure_invokeai_model()
+        elif selection == 2:
+            _configure_api_server("automatic1111", "Automatic1111")
+        elif selection == 3:
+            _configure_automatic1111_model()
+        clear_screen()
+
+
 def run_configure_menu() -> None:
-    options = ["Shodan Scan", "Ollama Server", "Ollama Model", "InvokeAI Server", "InvokeAI Model", "[Back]"]
+    options = ["Shodan Scan", "Configure Chat", "Configure Image Generation", "[Back]"]
     while True:
         selection = _prompt_selection("Configure:", options)
         if selection is None or selection == len(options) - 1:
@@ -2814,22 +2957,12 @@ def run_configure_menu() -> None:
             continue
         if selection == 1:
             clear_screen()
-            _configure_api_server("ollama", "Ollama")
+            run_configure_chat_menu()
             clear_screen()
             continue
         if selection == 2:
             clear_screen()
-            _configure_ollama_model()
-            clear_screen()
-            continue
-        if selection == 3:
-            clear_screen()
-            _configure_api_server("invokeai", "InvokeAI")
-            clear_screen()
-            continue
-        if selection == 4:
-            clear_screen()
-            _configure_invokeai_model()
+            run_configure_image_menu()
             clear_screen()
             continue
 
@@ -2839,7 +2972,16 @@ def run_llm_menu() -> None:
 
 
 def run_image_menu() -> None:
-    run_image_mode()
+    options = ["InvokeAI", "Automatic1111", "[Back]"]
+    while True:
+        selection = _prompt_selection("Select Image Generator:", options)
+        if selection is None or selection == len(options) - 1:
+            return
+        if selection == 0:
+            run_image_mode()
+        elif selection == 1:
+            run_automatic1111_mode()
+        clear_screen()
 
 
 def run_automatic1111_mode() -> None:
@@ -2848,14 +2990,10 @@ def run_automatic1111_mode() -> None:
 
     while True:
         clear_screen()
-        servers = load_servers("automatic1111")
-        if not servers:
+        server_choice = _choose_server_for_api("automatic1111", allow_back=True)
+        if server_choice is None:
             print(f"{RED}No Automatic1111 servers available{RESET}")
             get_input(f"{CYAN}Press Enter to return to the main menu{RESET}")
-            return
-
-        server_choice = select_server(servers, allow_back=True)
-        if server_choice is None:
             return
         selected_server = server_choice
         port = selected_server["apis"].get("automatic1111")
@@ -2864,8 +3002,13 @@ def run_automatic1111_mode() -> None:
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
 
+        host, scheme = connection_details(selected_server, "automatic1111")
         client = Automatic1111Client(
-            selected_server["ip"], port, selected_server["nickname"], DATA_DIR
+            host,
+            port,
+            selected_server["nickname"],
+            DATA_DIR,
+            scheme=scheme,
         )
 
         try:
@@ -2985,11 +3128,16 @@ def load_servers(api_type=None):
             nickname = group.iloc[0]["nickname"]
             country = group.iloc[0].get("country", "")
             ping_val = group.iloc[0].get("ping", float("inf"))
+            scheme = str(group.iloc[0].get("scheme", "") or "http").strip().lower()
+            if scheme not in {"http", "https"}:
+                scheme = "http"
+            api_host = str(group.iloc[0].get("api_host", "") or ip).strip() or ip
             servers.append(
                 {
                     "ip": ip,
                     "nickname": nickname,
                     "apis": ports,
+                    "connections": {api: {"scheme": scheme, "host": api_host}},
                     "country": country,
                     "ping": ping_val,
                     "api_type": api,
@@ -3133,31 +3281,46 @@ def ping_time(ip, port):
         return None
 
 
-def check_ollama_api(ip, port):
+def check_ollama_api(ip, port, *, api_host=None, scheme="http"):
     """Verify the Ollama API responds on the host and port."""
     try:
-        r = requests.get(f"http://{ip}:{port}/api/tags", timeout=2)
-        return r.status_code == 200
-    except requests.RequestException:
+        host = api_host or ip
+        r = requests.get(
+            f"{scheme}://{host}:{port}/api/tags",
+            timeout=5,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        models = payload.get("models") if isinstance(payload, dict) else None
+        return isinstance(models, list) and bool(models)
+    except (requests.RequestException, ValueError):
         return False
 
 
-def check_invoke_api(ip, port):
+def check_invoke_api(ip, port, *, api_host=None, scheme="http"):
     """Verify an InvokeAI server responds at the provided host and port."""
-    client = InvokeAIClient(ip, int(port), data_dir=DATA_DIR)
+    client = InvokeAIClient(
+        api_host or ip,
+        int(port),
+        data_dir=DATA_DIR,
+        scheme=scheme,
+        allow_https_fallback=False,
+    )
     try:
         client.check_health()
-        return True
+        return bool(client.list_models())
     except InvokeAIClientError:
         return False
     except requests.RequestException:
         return False
 
 
-def check_automatic1111_api(ip, port):
+def check_automatic1111_api(ip, port, *, api_host=None, scheme="http"):
     """Verify an Automatic1111 server responds at the provided host and port."""
 
-    client = Automatic1111Client(ip, int(port), data_dir=DATA_DIR)
+    client = Automatic1111Client(
+        api_host or ip, int(port), data_dir=DATA_DIR, scheme=scheme
+    )
     try:
         return client.check_health()
     except Automatic1111ClientError:
@@ -3166,16 +3329,18 @@ def check_automatic1111_api(ip, port):
         return False
 
 
-def _probe_endpoint(api_type, ip, port, perform_api_check):
+def _probe_endpoint(api_type, ip, port, perform_api_check, api_host=None, scheme="http"):
     latency = ping_time(ip, port)
     api_ok = None
     if latency is not None and perform_api_check:
         if api_type == "invokeai":
-            api_ok = check_invoke_api(ip, port)
+            api_ok = check_invoke_api(ip, port, api_host=api_host, scheme=scheme)
         elif api_type == "automatic1111":
-            api_ok = check_automatic1111_api(ip, port)
+            api_ok = check_automatic1111_api(
+                ip, port, api_host=api_host, scheme=scheme
+            )
         else:
-            api_ok = check_ollama_api(ip, port)
+            api_ok = check_ollama_api(ip, port, api_host=api_host, scheme=scheme)
     return latency, api_ok
 
 
@@ -3221,7 +3386,13 @@ def update_pings(
                 continue
 
             perform_api_check = verify_api and update_activity
-            candidates.append((idx, ip, port, currently_active, perform_api_check))
+            api_host = str(row.get("api_host", "") or ip).strip() or ip
+            scheme = str(row.get("scheme", "") or "http").strip().lower()
+            if scheme not in {"http", "https"}:
+                scheme = "http"
+            candidates.append(
+                (idx, ip, port, currently_active, perform_api_check, api_host, scheme)
+            )
 
         if not candidates:
             write_endpoints(api, df)
@@ -3230,13 +3401,15 @@ def update_pings(
         worker_count = max(1, min(max_workers, len(candidates)))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_map = {}
-            for idx, ip, port, currently_active, perform_api_check in candidates:
+            for idx, ip, port, currently_active, perform_api_check, api_host, scheme in candidates:
                 future = executor.submit(
                     _probe_endpoint,
                     api,
                     ip,
                     port,
                     perform_api_check,
+                    api_host,
+                    scheme,
                 )
                 future_map[future] = (idx, currently_active)
 
@@ -3526,8 +3699,18 @@ def try_embeddings_request(model, prompt_text, headers, timeout_val):
     return format_embedding_response(vector), False, False
 
 
+def connection_details(server, api):
+    connection = server.get("connections", {}).get(api, {})
+    scheme = str(connection.get("scheme", "http") or "http").strip().lower()
+    if scheme not in {"http", "https"}:
+        scheme = "http"
+    host = str(connection.get("host", "") or server["ip"]).strip() or server["ip"]
+    return host, scheme
+
+
 def build_url(server, api):
-    return f"http://{server['ip']}:{server['apis'][api]}"
+    host, scheme = connection_details(server, api)
+    return f"{scheme}://{host}:{server['apis'][api]}"
 
 def redraw_ui(model):
     clear_screen()
@@ -3808,9 +3991,9 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
             timeout_val = REQUEST_TIMEOUT * (len(messages) + 1)
 
             chat_paths = [
+                "/api/chat",
                 "/v1/chat/completions",
                 "/v1/chat",
-                "/api/chat",
                 "/chat",
             ]
 
@@ -3834,11 +4017,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         )
                         r.raise_for_status()
                         data = r.json()
-                        msg = (
-                            data.get("choices", [{}])[0].get("message", {}).get("content")
-                            or data.get("choices", [{}])[0].get("text")
-                            or data.get("completion")
-                        )
+                        msg = extract_chat_text(data)
                         if msg:
                             resp = msg
                             break
@@ -3885,11 +4064,7 @@ def chat_loop(model, conv_file, messages=None, history=None, context=None):
                         )
                         r.raise_for_status()
                         data = r.json()
-                        msg = (
-                            data.get("choices", [{}])[0].get("text")
-                            or data.get("completion")
-                            or data.get("response")
-                        )
+                        msg = extract_chat_text(data)
                         if msg:
                             resp = msg
                             if "context" in data:
@@ -4098,7 +4273,15 @@ def run_image_mode():
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
 
-        client = InvokeAIClient(selected_server["ip"], port, selected_server["nickname"], DATA_DIR)
+        host, scheme = connection_details(selected_server, "invokeai")
+        client = InvokeAIClient(
+            host,
+            port,
+            selected_server["nickname"],
+            DATA_DIR,
+            scheme=scheme,
+            allow_https_fallback=False,
+        )
         try:
             client.check_health()
         except InvokeAIClientError as exc:
@@ -4113,21 +4296,21 @@ def run_image_mode():
             continue
 
         try:
-            board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+            board_id = client.ensure_board(BORROWEDCOMPUTE_BOARD_NAME)
         except InvokeAIClientError as exc:
             print(f"{RED}{exc}{RESET}")
             _forget_server_selection("invokeai")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
-        if not _is_valid_terminalai_board_id(board_id):
-            print(f"{RED}{TERMINALAI_BOARD_ID_ERROR_MESSAGE}{RESET}")
+        if not _is_valid_borrowedcompute_board_id(board_id):
+            print(f"{RED}{BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE}{RESET}")
             _forget_server_selection("invokeai")
             get_input(f"{CYAN}Press Enter to pick another server{RESET}")
             continue
 
         normalized_board_id = _normalize_board_id(board_id) or board_id
         print(
-            f"{GREEN}Images will be saved to board {TERMINALAI_BOARD_NAME} (id: {normalized_board_id}).{RESET}"
+            f"{GREEN}Images will be saved to board {BORROWEDCOMPUTE_BOARD_NAME} (id: {normalized_board_id}).{RESET}"
         )
         try:
             models = client.list_models()
@@ -4203,7 +4386,7 @@ def run_image_mode():
 MODE_DISPATCH.update(
     {
         "chat": run_chat_mode,
-        "imagine": run_image_mode,
+        "imagine": run_image_menu,
         "configure": run_configure_menu,
         "llm": run_llm_menu,
         "llm-ollama": run_chat_mode,

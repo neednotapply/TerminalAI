@@ -1,4 +1,4 @@
-"""Discord bot wrapper for navigating TerminalAI menus.
+"""Discord bot wrapper for navigating BorrowedCompute menus.
 
 This bot mirrors the launcher menu structure and exposes it through
 Discord application commands. Responses are sent ephemerally so each
@@ -46,12 +46,17 @@ from invoke_client import (
     InvokeAIClientError,
     InvokeAIModel,
 )
-from TerminalAI import (
+from automatic1111_client import (
+    Automatic1111Client,
+    Automatic1111ClientError,
+    Automatic1111Model,
+)
+from BorrowedCompute import (
     REQUEST_TIMEOUT,
-    TERMINALAI_BOARD_ID_ERROR_MESSAGE,
-    TERMINALAI_BOARD_NAME,
+    BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE,
+    BORROWEDCOMPUTE_BOARD_NAME,
     _normalize_board_id,
-    _is_valid_terminalai_board_id,
+    _is_valid_borrowedcompute_board_id,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -378,11 +383,18 @@ class ChatContext:
 
     @property
     def base_url(self) -> Optional[str]:
-        host = _first_value(self.endpoint.get("ip") or self.endpoint.get("hostnames"))
+        host = _first_value(
+            self.endpoint.get("api_host")
+            or self.endpoint.get("ip")
+            or self.endpoint.get("hostnames")
+        )
         port = _first_value(self.endpoint.get("port"))
         if not host or not port:
             return None
-        return f"http://{host}:{port}"
+        scheme = str(self.endpoint.get("scheme") or "http").strip().lower()
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+        return f"{scheme}://{host}:{port}"
 
     def describe(self) -> str:
         name = self.endpoint.get("id") or "Selected endpoint"
@@ -600,6 +612,27 @@ def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
         return _fetch_ollama_models(chat)
     if chat.mode == "image-invokeai":
         return _fetch_invoke_models(chat)
+    if chat.mode == "image-automatic1111":
+        host = _first_value(
+            chat.endpoint.get("api_host")
+            or chat.endpoint.get("ip")
+            or chat.endpoint.get("hostnames")
+        )
+        port = _first_value(chat.endpoint.get("port"))
+        if not host or not port:
+            return []
+        scheme = str(chat.endpoint.get("scheme") or "http").strip().lower()
+        try:
+            client = Automatic1111Client(
+                host,
+                int(port),
+                chat.endpoint.get("id") or host,
+                DATA_DIR,
+                scheme=scheme,
+            )
+            return [model.title or model.name for model in client.list_models()]
+        except (Automatic1111ClientError, requests.RequestException, ValueError):
+            return []
 
     base_url = chat.base_url
     if not base_url:
@@ -623,6 +656,15 @@ def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
 
 
 def _extract_chat_content(payload: dict) -> Optional[str]:
+    native_message = payload.get("message")
+    if isinstance(native_message, dict):
+        for key in ("content", "thinking"):
+            content = native_message.get(key)
+            if isinstance(content, str) and content.strip():
+                return content
+    elif isinstance(native_message, str) and native_message.strip():
+        return native_message
+
     choices = payload.get("choices")
     if isinstance(choices, list) and choices:
         first = choices[0]
@@ -632,7 +674,7 @@ def _extract_chat_content(payload: dict) -> Optional[str]:
                 content = message.get("content")
                 if content:
                     return content
-    for key in ("message", "response", "content", "text"):
+    for key in ("response", "content", "text", "thinking"):
         candidate = payload.get(key)
         if isinstance(candidate, str) and candidate.strip():
             return candidate
@@ -640,14 +682,26 @@ def _extract_chat_content(payload: dict) -> Optional[str]:
 
 
 def _fetch_invoke_models(chat: ChatContext) -> List[str]:
-    host = _first_value(chat.endpoint.get("ip") or chat.endpoint.get("hostnames"))
+    host = _first_value(
+        chat.endpoint.get("api_host")
+        or chat.endpoint.get("ip")
+        or chat.endpoint.get("hostnames")
+    )
     port = _first_value(chat.endpoint.get("port"))
     if not host or not port:
         chat.board_error = "Selected server is missing connection details."
         return []
 
     try:
-        client = InvokeAIClient(host, int(port), chat.endpoint.get("id") or host, DATA_DIR)
+        scheme = str(chat.endpoint.get("scheme") or "http").strip().lower()
+        client = InvokeAIClient(
+            host,
+            int(port),
+            chat.endpoint.get("id") or host,
+            DATA_DIR,
+            scheme=scheme,
+            allow_https_fallback=False,
+        )
     except (TypeError, ValueError) as exc:
         chat.board_error = f"Unable to connect to InvokeAI server: {exc}"
         return []
@@ -662,7 +716,7 @@ def _fetch_invoke_models(chat: ChatContext) -> List[str]:
         return []
 
     try:
-        board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+        board_id = client.ensure_board(BORROWEDCOMPUTE_BOARD_NAME)
     except InvokeAIClientError as exc:
         chat.board_error = str(exc)
         return []
@@ -670,13 +724,13 @@ def _fetch_invoke_models(chat: ChatContext) -> List[str]:
         chat.board_error = f"Network error while verifying InvokeAI board: {exc}"
         return []
 
-    if not _is_valid_terminalai_board_id(board_id):
-        chat.board_error = TERMINALAI_BOARD_ID_ERROR_MESSAGE
+    if not _is_valid_borrowedcompute_board_id(board_id):
+        chat.board_error = BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE
         return []
 
     normalized_id = _normalize_board_id(board_id) or board_id
     chat.board_notice = (
-        f"Images will be saved to board {TERMINALAI_BOARD_NAME} (id: {normalized_id})."
+        f"Images will be saved to board {BORROWEDCOMPUTE_BOARD_NAME} (id: {normalized_id})."
     )
 
     try:
@@ -697,7 +751,7 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
     if not base_url:
         return "The selected server is missing connection details."
 
-    chat_paths = ["/v1/chat/completions", "/api/chat", "/chat"]
+    chat_paths = ["/api/chat", "/v1/chat/completions", "/chat"]
     _prune_chat_messages(chat)
     now = time.time()
     pending_message = {"role": "user", "content": prompt, "timestamp": now}
@@ -761,10 +815,19 @@ def _send_imagine_request(
     steps: int,
     cfg_scale: float,
 ) -> tuple[Optional[str], Optional[Path]]:
-    host = _first_value(chat.endpoint.get("ip") or chat.endpoint.get("hostnames"))
+    if chat.mode == "image-automatic1111":
+        return _send_automatic1111_request(
+            chat, prompt, negative_prompt, width, height, steps, cfg_scale
+        )
+
+    host = _first_value(
+        chat.endpoint.get("api_host")
+        or chat.endpoint.get("ip")
+        or chat.endpoint.get("hostnames")
+    )
     port = _first_value(chat.endpoint.get("port"))
     if not host or not port:
-        return "Select an InvokeAI server with /terminalai before sending prompts.", None
+        return "Select an InvokeAI server with /borrowedcompute before sending prompts.", None
 
     sanitized_width = max(64, min(width, 2048))
     sanitized_height = max(64, min(height, 2048))
@@ -773,23 +836,31 @@ def _send_imagine_request(
     scheduler = DEFAULT_SCHEDULER
 
     try:
-        client = InvokeAIClient(host, int(port), chat.endpoint.get("id") or host, DATA_DIR)
+        scheme = str(chat.endpoint.get("scheme") or "http").strip().lower()
+        client = InvokeAIClient(
+            host,
+            int(port),
+            chat.endpoint.get("id") or host,
+            DATA_DIR,
+            scheme=scheme,
+            allow_https_fallback=False,
+        )
     except (InvokeAIClientError, ValueError, TypeError) as exc:
         return f"Unable to connect to InvokeAI: {exc}", None
 
     model = _resolve_invoke_model(client, chat.model)
     if not model:
-        return "Select a model with /terminalai before sending image prompts.", None
+        return "Select a model with /borrowedcompute before sending image prompts.", None
 
     try:
-        board_id = client.ensure_board(TERMINALAI_BOARD_NAME)
+        board_id = client.ensure_board(BORROWEDCOMPUTE_BOARD_NAME)
     except InvokeAIClientError as exc:
         return str(exc), None
     except requests.RequestException as exc:  # pragma: no cover - network failure
         return f"Network error while preparing the board: {exc}", None
 
-    if not _is_valid_terminalai_board_id(board_id):
-        return TERMINALAI_BOARD_ID_ERROR_MESSAGE, None
+    if not _is_valid_borrowedcompute_board_id(board_id):
+        return BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE, None
     try:
         result = client.generate_image(
             model=model,
@@ -800,7 +871,7 @@ def _send_imagine_request(
             steps=sanitized_steps,
             cfg_scale=sanitized_cfg,
             scheduler=scheduler,
-            board_name=TERMINALAI_BOARD_NAME,
+            board_name=BORROWEDCOMPUTE_BOARD_NAME,
         )
     except InvokeAIClientError as exc:
         return str(exc), None
@@ -811,6 +882,66 @@ def _send_imagine_request(
     if not image_path:
         return "InvokeAI did not return an image file.", None
 
+    return None, image_path
+
+
+def _send_automatic1111_request(
+    chat: ChatContext,
+    prompt: str,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    cfg_scale: float,
+) -> tuple[Optional[str], Optional[Path]]:
+    host = _first_value(
+        chat.endpoint.get("api_host")
+        or chat.endpoint.get("ip")
+        or chat.endpoint.get("hostnames")
+    )
+    port = _first_value(chat.endpoint.get("port"))
+    if not host or not port:
+        return "Selected Automatic1111 server is missing connection details.", None
+
+    scheme = str(chat.endpoint.get("scheme") or "http").strip().lower()
+    try:
+        client = Automatic1111Client(
+            host,
+            int(port),
+            chat.endpoint.get("id") or host,
+            DATA_DIR,
+            scheme=scheme,
+        )
+        models = client.list_models()
+        model = next(
+            (
+                item
+                for item in models
+                if chat.model in {item.name, item.title}
+            ),
+            None,
+        )
+        if model is None:
+            return "The selected Automatic1111 model is no longer available.", None
+        samplers = client.list_samplers()
+        result = client.txt2img(
+            model=model,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=max(64, min(width, 2048)),
+            height=max(64, min(height, 2048)),
+            steps=max(1, min(steps, 150)),
+            cfg_scale=max(0.0, min(cfg_scale, 30.0)),
+            sampler=samplers[0] if samplers else None,
+            seed=None,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except (Automatic1111ClientError, requests.RequestException, ValueError) as exc:
+        return f"Automatic1111 generation failed: {exc}", None
+
+    image_path = result.get("path") if isinstance(result, dict) else None
+    if not image_path:
+        return "Automatic1111 did not return an image file.", None
     return None, image_path
 
 
@@ -847,7 +978,7 @@ class ProviderSelect(discord.ui.Select):
         label = option.get("label", "Unknown option")
         self.session.log(f"{self.top_key} -> {label}")
 
-        if option.get("script") == "TerminalAI.py":
+        if option.get("script") == "BorrowedCompute.py":
             mode = _mode_from_args(option.get("extra_args", [])) or ""
             endpoints = _load_endpoints(mode)
             self.session.mode = mode
@@ -1064,7 +1195,7 @@ class ChangeServerButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
         if not self.session.endpoints:
             content = _compose_content(
-                "No server list available. Pick a menu again with /terminalai.",
+                "No server list available. Pick a menu again with /borrowedcompute.",
                 self.session,
                 self.session.chat,
             )
@@ -1112,7 +1243,7 @@ async def chat_command(interaction: discord.Interaction, prompt: str) -> None:
     chat = _get_context(interaction.user.id, "llm-ollama")
     if not chat or not chat.model:
         await interaction.response.send_message(
-            "Select a chat server and model with /terminalai first."
+            "Select a chat server and model with /borrowedcompute first."
         )
         return
 
@@ -1125,7 +1256,7 @@ async def chat_command(interaction: discord.Interaction, prompt: str) -> None:
     await interaction.edit_original_response(content=_trim_discord_message(body))
 
 
-@app_commands.command(name="imagine", description="Generate an image with your selected InvokeAI server")
+@app_commands.command(name="imagine", description="Generate an image with your selected image server")
 @app_commands.describe(
     prompt="Image prompt to submit",
     negative_prompt="What to avoid in the image",
@@ -1149,10 +1280,14 @@ async def imagine_command(
         return
 
     session = _get_session(interaction.user.id)
-    chat = _get_context(interaction.user.id, "image-invokeai")
+    chat = session.chat if session.chat and session.chat.mode.startswith("image-") else None
+    if chat is None:
+        chat = _get_context(interaction.user.id, "image-invokeai")
+    if chat is None:
+        chat = _get_context(interaction.user.id, "image-automatic1111")
     if not chat or not chat.model:
         await interaction.response.send_message(
-            "Select an InvokeAI server and model with /terminalai before calling /imagine."
+            "Select an image server and model with /borrowedcompute before calling /imagine."
         )
         return
 
@@ -1197,7 +1332,7 @@ async def _reply_to_mention(
     chat = _get_context(message.author.id, "llm-ollama")
     if not chat or not chat.model:
         await message.reply(
-            "Select a chat server and model with /terminalai first.",
+            "Select a chat server and model with /borrowedcompute first.",
             mention_author=False,
         )
         return
@@ -1211,7 +1346,7 @@ async def _reply_to_mention(
         await message.reply(_trim_discord_message(body), mention_author=False)
 
 
-# TerminalAI Discord direct-mode navigation (launcher-compatible)
+# BorrowedCompute Discord direct-mode navigation (launcher-compatible)
 async def _show_endpoint_menu(
     interaction: discord.Interaction,
     session: MenuSession,
@@ -1245,13 +1380,13 @@ async def _show_endpoint_menu(
 
 
 class ConfigureSelect(discord.ui.Select):
-    """Discord equivalent of TerminalAI's direct Configure menu."""
+    """Discord equivalent of BorrowedCompute's direct Configure menu."""
 
     def __init__(self, session: MenuSession):
         options = [
             discord.SelectOption(label="Scan all servers", value="scan"),
-            discord.SelectOption(label="Choose Ollama server", value="ollama"),
-            discord.SelectOption(label="Choose InvokeAI server", value="invokeai"),
+            discord.SelectOption(label="Configure chat", value="chat"),
+            discord.SelectOption(label="Configure image generation", value="image"),
             discord.SelectOption(label="[Back]", value="back"),
         ]
         super().__init__(
@@ -1274,23 +1409,21 @@ class ConfigureSelect(discord.ui.Select):
             )
             return
 
-        if action == "ollama":
-            self.session.log("Configure -> Ollama Servers")
-            await _show_endpoint_menu(
+        if action == "chat":
+            self.session.log("Configure -> Chat")
+            await _update_menu_message(
                 interaction,
-                self.session,
-                "Ollama",
-                "llm-ollama",
+                _compose_content("Configure chat:", self.session),
+                ConfigureChatView(self.session),
             )
             return
 
-        if action == "invokeai":
-            self.session.log("Configure -> InvokeAI Servers")
-            await _show_endpoint_menu(
+        if action == "image":
+            self.session.log("Configure -> Image Generation")
+            await _update_menu_message(
                 interaction,
-                self.session,
-                "InvokeAI",
-                "image-invokeai",
+                _compose_content("Configure image generation:", self.session),
+                ConfigureImageView(self.session),
             )
             return
 
@@ -1310,6 +1443,81 @@ class ConfigureView(discord.ui.View):
         super().__init__(timeout=300)
         self.session = session
         self.add_item(ConfigureSelect(session))
+
+
+class ConfigureChatSelect(discord.ui.Select):
+    def __init__(self, session: MenuSession):
+        super().__init__(
+            placeholder="Select a chat provider",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="Ollama", value="ollama"),
+                discord.SelectOption(label="[Back]", value="back"),
+            ],
+        )
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        if self.values[0] == "back":
+            await _update_menu_message(
+                interaction,
+                _compose_content("Configure:", self.session),
+                ConfigureView(self.session),
+            )
+            return
+        self.session.log("Configure Chat -> Ollama")
+        await _show_endpoint_menu(interaction, self.session, "Ollama", "llm-ollama")
+
+
+class ConfigureChatView(discord.ui.View):
+    def __init__(self, session: MenuSession):
+        super().__init__(timeout=300)
+        self.add_item(ConfigureChatSelect(session))
+
+
+class ConfigureImageSelect(discord.ui.Select):
+    def __init__(self, session: MenuSession):
+        super().__init__(
+            placeholder="Select an image provider",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="InvokeAI", value="invokeai"),
+                discord.SelectOption(label="Automatic1111", value="automatic1111"),
+                discord.SelectOption(label="[Back]", value="back"),
+            ],
+        )
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        action = self.values[0]
+        if action == "back":
+            await _update_menu_message(
+                interaction,
+                _compose_content("Configure:", self.session),
+                ConfigureView(self.session),
+            )
+            return
+        if action == "invokeai":
+            self.session.log("Configure Image -> InvokeAI")
+            await _show_endpoint_menu(
+                interaction, self.session, "InvokeAI", "image-invokeai"
+            )
+            return
+        self.session.log("Configure Image -> Automatic1111")
+        await _show_endpoint_menu(
+            interaction,
+            self.session,
+            "Automatic1111",
+            "image-automatic1111",
+        )
+
+
+class ConfigureImageView(discord.ui.View):
+    def __init__(self, session: MenuSession):
+        super().__init__(timeout=300)
+        self.add_item(ConfigureImageSelect(session))
 
 
 class TopMenuView(discord.ui.View):
@@ -1342,7 +1550,7 @@ class TopMenuView(discord.ui.View):
 
         if key == "exit":
             await _update_menu_message(
-                interaction, "Session closed. Use /terminalai to start again.", None
+                interaction, "Session closed. Use /borrowedcompute to start again.", None
             )
             return
 
@@ -1350,7 +1558,6 @@ class TopMenuView(discord.ui.View):
         # PROVIDER_OPTIONS submenus. Match that behavior in Discord.
         direct_modes = {
             "chat": ("Ollama", "llm-ollama"),
-            "imagine": ("InvokeAI", "image-invokeai"),
         }
         if key in direct_modes:
             provider_label, mode = direct_modes[key]
@@ -1363,7 +1570,7 @@ class TopMenuView(discord.ui.View):
             return
 
         if key == "configure":
-            content = _compose_content("Configure TerminalAI:", self.session)
+            content = _compose_content("Configure BorrowedCompute:", self.session)
             await _update_menu_message(interaction, content, ConfigureView(self.session))
             return
 
@@ -1385,7 +1592,7 @@ class TopMenuView(discord.ui.View):
         )
 
 
-class TerminalAIDiscord(commands.Bot):
+class BorrowedComputeDiscord(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -1407,10 +1614,10 @@ class TerminalAIDiscord(commands.Bot):
         await super().on_message(message)
 
 
-bot = TerminalAIDiscord()
+bot = BorrowedComputeDiscord()
 
 
-@app_commands.command(name="terminalai", description="Open the TerminalAI menu in Discord")
+@app_commands.command(name="borrowedcompute", description="Open the BorrowedCompute menu in Discord")
 async def start_menu(interaction: discord.Interaction) -> None:
     session = _reset_session(interaction.user.id)
     view = TopMenuView(session)

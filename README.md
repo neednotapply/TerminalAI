@@ -1,6 +1,6 @@
-# TerminalAI
+# BorrowedCompute
 
-TerminalAI is a retro-styled client for chatting with Ollama models, generating images from community InvokeAI servers, and for discovering new public instances via Shodan. A launcher provides a unified entry point on Linux, macOS, and Windows.
+BorrowedCompute is a retro-styled client for chatting with Ollama models, generating images from community InvokeAI servers, and for discovering new public instances via Shodan. A launcher provides a unified entry point on Linux, macOS, and Windows.
 
 ## Installation
 
@@ -8,7 +8,7 @@ TerminalAI is a retro-styled client for chatting with Ollama models, generating 
 
    ```bash
    git clone <REPO_URL>
-   cd TerminalAI
+   cd BorrowedCompute
    ```
 
 2. **Install Python dependencies**
@@ -21,7 +21,7 @@ TerminalAI is a retro-styled client for chatting with Ollama models, generating 
 3. **Prepare data files**
    - Copy `data/ollama.endpoints.example.csv` to `data/ollama.endpoints.csv` and add any known Ollama servers.
    - Copy `data/invoke.endpoints.example.csv` to `data/invoke.endpoints.csv` for InvokeAI hosts.
-   - (Optional) Create `data/config.json` to store your Shodan API key and Discord bot settings (`DISCORD_BOT_TOKEN`, `TERMINALAI_WORKING_DIR`). A template is available at `data/config.example.json`.
+   - (Optional) Create `data/config.json` to store your Shodan API key and Discord bot settings (`DISCORD_BOT_TOKEN`, `BORROWEDCOMPUTE_WORKING_DIR`). A template is available at `data/config.example.json`.
 
 ## Usage
 
@@ -32,7 +32,9 @@ Use the launcher for a graphical menu with matrix rain effects.
 - **Linux/macOS**: `./launcher.sh`
 - **Windows**: `launcher.bat`
 
-The launcher now groups actions by API. Pick **LLM Chat** or **Image Generation**, then choose a provider-specific task such as launching TerminalAI or running a Shodan scan scoped to that API. Endpoint refreshes still update the corresponding CSV files under `data/`.
+The launcher now groups actions by API. Pick **LLM Chat** or **Image Generation**, then choose a provider-specific task such as launching BorrowedCompute or running a Shodan scan scoped to that API. Endpoint refreshes still update the corresponding CSV files under `data/`.
+
+The **Configure** menu is organized by capability: **Configure Chat** contains Ollama server/model selection, while **Configure Image Generation** contains InvokeAI and Automatic1111 server/model selection.
 
 Press the highlighted number to choose an option. The launcher restores the console on exit.
 
@@ -41,16 +43,16 @@ Press the highlighted number to choose an option. The launcher restores the cons
 Run the chat client directly if desired:
 
 ```bash
-python3 scripts/TerminalAI.py
+python3 scripts/BorrowedCompute.py
 ```
 
 The client loads servers from `data/ollama.endpoints.csv` (for chat) and `data/invoke.endpoints.csv` (for image generation), pings them to sort by latency, and stores conversations under `data/conversations`. Logs produced with the `/print` command are written to `data/logs`.
 
 ### Image Generation
 
-InvokeAI image generation is available from the main TerminalAI menu. The client automatically discovers active InvokeAI servers from the shared endpoint list, lists the models each host exposes, and walks through prompt configuration (including width/height, steps, CFG scale, scheduler, and optional seed). Generated images are downloaded to `data/images/` along with per-render metadata.
+InvokeAI and Automatic1111 image generation are available from the main BorrowedCompute menu. The client discovers API-compatible servers, lists the models each host exposes, and walks through prompt configuration (including width/height, steps, CFG scale, scheduler or sampler, and optional seed). Generated images are downloaded to `data/images/` along with per-render metadata.
 
-TerminalAI renders image previews directly in the terminal using [chafa.py](https://github.com/GuardKenzie/chafa.py) (with [Pillow](https://python-pillow.org/)) and will fall back to the [chafa](https://hpjansson.org/chafa/) CLI if the Python bindings are unavailable.
+BorrowedCompute renders image previews directly in the terminal using [chafa.py](https://github.com/GuardKenzie/chafa.py) (with [Pillow](https://python-pillow.org/)) and will fall back to the [chafa](https://hpjansson.org/chafa/) CLI if the Python bindings are unavailable.
 
 ### Discord Bot (optional)
 
@@ -68,7 +70,7 @@ An optional Discord bot mirrors the launcher menus with per-user, ephemeral inte
    ```json
    {
      "DISCORD_BOT_TOKEN": "<your token>",
-     "TERMINALAI_WORKING_DIR": "optional/path/if/scripts/aren't/in/PWD"
+     "BORROWEDCOMPUTE_WORKING_DIR": "optional/path/if/scripts/aren't/in/PWD"
    }
    ```
 
@@ -78,9 +80,9 @@ An optional Discord bot mirrors the launcher menus with per-user, ephemeral inte
    python3 discord_bot.py
    ```
 
-The bot exposes a `/terminalai` command that opens the same menus you see in the launcher. Use it to pick servers and models, then send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI). Shodan scans run directly from Discord and now offer a single option that checks all supported server types.
+The bot exposes a `/borrowedcompute` command that opens the same menus you see in the launcher. Use it to pick servers and models, then send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI or Automatic1111). Shodan scans run directly from Discord and offer a single option that checks all supported server types.
 
-Your most recent Discord server and model selections are saved to `data/discord_preferences.json`. The bot loads these preferences on startup so you can use `/chat` or `/imagine` immediately after a restart. Run `/terminalai` again if you need to change the server or your preferred host is unavailable.
+Your most recent Discord server and model selections are saved to `data/discord_preferences.json`. The bot loads these preferences on startup so you can use `/chat` or `/imagine` immediately after a restart. Run `/borrowedcompute` again if you need to change the server or your preferred host is unavailable.
 
 ### Shodan Scan
 
