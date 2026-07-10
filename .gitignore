@@ -8,5 +8,6 @@ data/model_capabilities.json
 data/menu_state.json
 data/discord_preferences.json
 data/discord_sessions.json
+data/discord_bot.lock
 scripts/*.bak.*-scanfix
 scripts/discord_bot.py.bak.discord-menu-fix

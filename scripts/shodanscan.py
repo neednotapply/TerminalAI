@@ -14,6 +14,7 @@ import requests
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib3.exceptions import InsecureRequestWarning
+from ollama_compat import probe_ollama_endpoint
 
 try:
     from invoke_client import STATIC_MODEL_ENDPOINTS
@@ -348,35 +349,19 @@ def _check_result(ok, reason, models, connection, return_connection):
 def check_ollama_api(ip, port, hostname=None, *, return_connection=False):
     """Check that the Ollama API responds on the given host and port."""
 
-    last_error = ""
     for scheme, host in _connection_candidates(ip, port, hostname):
-        url = f"{scheme}://{host}:{port}/api/tags"
-        try:
-            r = requests.get(url, timeout=5)
-            r.raise_for_status()
-            try:
-                data = r.json()
-                raw_models = data.get("models") if isinstance(data, dict) else None
-                if not isinstance(raw_models, list):
-                    last_error = "invalid /api/tags response"
-                    continue
-                models = [
-                    m.get("name") or m.get("model") or m.get("id")
-                    for m in raw_models
-                    if isinstance(m, dict)
-                ]
-                models = [m for m in models if m]
-            except (TypeError, ValueError):
-                last_error = "invalid JSON from /api/tags"
-                continue
-            if not models:
-                last_error = "Ollama server has no installed models"
-                continue
+        result = probe_ollama_endpoint(
+            {"scheme": scheme, "api_host": host, "port": port},
+            force=True,
+        )
+        if result.accessible:
             connection = {"scheme": scheme, "api_host": host}
-            return _check_result(True, "", models, connection, return_connection)
-        except requests.RequestException as exc:
-            last_error = str(exc)
-    return _check_result(False, last_error or "Ollama API check failed", [], None, return_connection)
+            return _check_result(True, "", result.chat_models, connection, return_connection)
+        if result.status == "requires_auth":
+            reason = "Ollama chat requires authentication"
+        else:
+            reason = result.reason or "Ollama API check failed"
+    return _check_result(False, reason, [], None, return_connection)
 
 
 def _parse_invoke_models(payload):

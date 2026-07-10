@@ -278,7 +278,7 @@ class Automatic1111Client:
             return message
         try:
             payload = response.json()
-        except ValueError:
+        except (TypeError, ValueError):
             payload = None
         detail = None
         if isinstance(payload, dict):
@@ -289,7 +289,7 @@ class Automatic1111Client:
             text = response.content.decode(errors="ignore").strip()
             if text:
                 detail = text[:200]
-        return f"{message} ({detail})" if detail else message
+        return f"{message} ({str(detail)[:300]})" if detail else message
 
     def _decode_image(self, payload: str) -> bytes:
         text = payload.strip()

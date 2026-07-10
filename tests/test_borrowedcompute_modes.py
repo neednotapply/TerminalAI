@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock, patch
+from ollama_compat import OllamaProbeResult
+import json
 
 import BorrowedCompute
 
@@ -268,27 +270,14 @@ def test_run_chat_mode_conversation_back_returns_to_main_menu(monkeypatch):
 
 
 def test_fetch_models_falls_back_to_ollama_tags(monkeypatch):
-    class FakeResponse:
-        def __init__(self, payload=None, error=None):
-            self._payload = payload
-            self._error = error
-
-        def raise_for_status(self):
-            if self._error is not None:
-                raise self._error
-
-        def json(self):
-            return self._payload
-
-    def fake_get(url, timeout=5):
-        if url.endswith("/v1/models"):
-            return FakeResponse(error=BorrowedCompute.requests.HTTPError("404"))
-        if url.endswith("/api/tags"):
-            return FakeResponse(payload={"models": [{"name": "llama3"}, {"name": "phi3"}]})
-        raise AssertionError(f"unexpected url: {url}")
-
     monkeypatch.setattr(BorrowedCompute, "SERVER_URL", "http://example", raising=False)
-    monkeypatch.setattr(BorrowedCompute.requests, "get", fake_get)
+    monkeypatch.setattr(
+        BorrowedCompute,
+        "probe_ollama_endpoint",
+        lambda endpoint: OllamaProbeResult(
+            "accessible", models=["llama3", "phi3"], chat_models=["llama3", "phi3"]
+        ),
+    )
     monkeypatch.setattr(BorrowedCompute, "_ensure_model_entry", lambda model: ({}, False))
     monkeypatch.setattr(BorrowedCompute, "update_model_capabilities_from_metadata", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(BorrowedCompute, "_save_model_capabilities", lambda: None)
@@ -297,25 +286,35 @@ def test_fetch_models_falls_back_to_ollama_tags(monkeypatch):
 
 
 def test_fetch_models_returns_empty_when_all_endpoints_fail(monkeypatch):
-    class FakeResponse:
-        def __init__(self, error=None):
-            self._error = error
-
-        def raise_for_status(self):
-            if self._error is not None:
-                raise self._error
-
-        def json(self):
-            return {}
-
     monkeypatch.setattr(BorrowedCompute, "SERVER_URL", "http://example", raising=False)
     monkeypatch.setattr(
-        BorrowedCompute.requests,
-        "get",
-        lambda *_args, **_kwargs: FakeResponse(error=BorrowedCompute.requests.RequestException("down")),
+        BorrowedCompute,
+        "probe_ollama_endpoint",
+        lambda endpoint: OllamaProbeResult("unavailable", reason="down"),
     )
 
     assert BorrowedCompute.fetch_models() == []
+
+
+def test_shared_selection_round_trip(monkeypatch, tmp_path):
+    state_path = tmp_path / "menu_state.json"
+    monkeypatch.setattr(BorrowedCompute, "MENU_STATE_FILE", state_path)
+    monkeypatch.setattr(BorrowedCompute, "MENU_STATE", {})
+
+    BorrowedCompute.save_shared_selection(
+        "ollama",
+        {"ip": "1.2.3.4", "port": "11434"},
+        model="llama3:latest",
+    )
+
+    assert json.loads(state_path.read_text()) == {
+        "ollama": {"ip": "1.2.3.4", "port": 11434, "model": "llama3:latest"}
+    }
+    assert BorrowedCompute.get_shared_selection("ollama") == {
+        "ip": "1.2.3.4",
+        "port": 11434,
+        "model": "llama3:latest",
+    }
 
 
 def test_configure_ollama_model_uses_preselected_server(monkeypatch):

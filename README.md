@@ -15,7 +15,13 @@ BorrowedCompute is a retro-styled client for chatting with Ollama models, genera
 
    ```bash
    cd scripts
-   pip3 install -r requirements.txt
+   python -m pip install -r requirements.txt
+   ```
+
+   On Windows, use the Python launcher if needed:
+
+   ```bat
+   py -m pip install -r requirements.txt
    ```
 
 3. **Prepare data files**
@@ -80,9 +86,9 @@ An optional Discord bot mirrors the launcher menus with per-user, ephemeral inte
    python3 discord_bot.py
    ```
 
-The bot exposes a `/borrowedcompute` command that opens the same menus you see in the launcher. Use it to pick servers and models, then send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI or Automatic1111). Shodan scans run directly from Discord and offer a single option that checks all supported server types.
+The bot exposes a `/config` command with a compact, private configuration menu. Choose **Shodan**, **Chat**, or **Imagine**, then select from servers and models that pass live compatibility checks. Send prompts with `/chat` (Ollama) or `/imagine` (InvokeAI or Automatic1111). Shodan scans run directly from Discord.
 
-Your most recent Discord server and model selections are saved to `data/discord_preferences.json`. The bot loads these preferences on startup so you can use `/chat` or `/imagine` immediately after a restart. Run `/borrowedcompute` again if you need to change the server or your preferred host is unavailable.
+Server and model selections are shared through `data/menu_state.json`. Configure a server and model in the terminal app, exit it, and the Discord bot will use those selections after validating availability. Discord selections are written back to the same file; `data/discord_preferences.json` remains a compatibility fallback for older saved preferences.
 
 ### Shodan Scan
 

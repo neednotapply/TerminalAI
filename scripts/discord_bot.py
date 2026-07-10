@@ -20,15 +20,40 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import logging
 import os
 import re
+import ssl
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses msvcrt below
+    fcntl = None
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
+import certifi
+
+LOGGER = logging.getLogger("borrowedcompute.discord")
+
+# Python 3.12 can fail while importing aiohttp when one malformed certificate
+# exists in the Windows certificate store. Use certifi's maintained CA bundle
+# for the default context so TLS verification remains enabled and the bot can
+# start without requiring a manual certificate-store cleanup.
+_create_default_context = ssl.create_default_context
+
+
+def _create_verified_context(*args, **kwargs):
+    if not args and not any(key in kwargs for key in ("cafile", "capath", "cadata")):
+        kwargs["cafile"] = certifi.where()
+    return _create_default_context(*args, **kwargs)
+
+
+ssl.create_default_context = _create_verified_context
 
 import discord
 from discord import app_commands
@@ -51,12 +76,15 @@ from automatic1111_client import (
     Automatic1111ClientError,
     Automatic1111Model,
 )
+from ollama_compat import OllamaProbeResult, endpoint_headers, probe_ollama_endpoint
 from BorrowedCompute import (
     REQUEST_TIMEOUT,
     BORROWEDCOMPUTE_BOARD_ID_ERROR_MESSAGE,
     BORROWEDCOMPUTE_BOARD_NAME,
     _normalize_board_id,
     _is_valid_borrowedcompute_board_id,
+    get_shared_selection,
+    save_shared_selection,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -170,8 +198,37 @@ class MenuSession:
 
 _sessions: Dict[int, MenuSession] = {}
 _active_contexts: Dict[int, Dict[str, ChatContext]] = {}
+_processed_mention_ids: set[int] = set()
 _MAX_CHAT_HISTORY = 10
 _CHAT_MEMORY_SECONDS = 180
+_INSTANCE_LOCK_HANDLE = None
+
+
+def _acquire_instance_lock() -> None:
+    """Prevent two bot processes from replying to the same Discord message."""
+
+    global _INSTANCE_LOCK_HANDLE
+    lock_path = DATA_DIR / "discord_bot.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    handle.seek(0)
+    handle.write(b"0")
+    handle.flush()
+    handle.seek(0)
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except (BlockingIOError, OSError) as exc:
+        handle.close()
+        raise SystemExit(
+            "Another discord_bot.py process is already running. "
+            "Stop it before starting another instance."
+        ) from exc
+    _INSTANCE_LOCK_HANDLE = handle
 
 
 def _load_persisted_state() -> dict:
@@ -223,6 +280,9 @@ def _save_context(user_id: int, chat: ChatContext) -> None:
         "available_models": chat.available_models,
     }
     _update_preferences_from_chat(chat)
+    shared_api_type = _shared_api_type_for_mode(chat.mode)
+    if shared_api_type:
+        save_shared_selection(shared_api_type, chat.endpoint, chat.model)
     SESSIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         with SESSIONS_PATH.open("w", encoding="utf-8") as handle:
@@ -247,9 +307,64 @@ def _persist_session(session: MenuSession) -> None:
         pass
 
 
+def _shared_api_type_for_mode(mode: str) -> Optional[str]:
+    return {
+        "llm-ollama": "ollama",
+        "image-invokeai": "invokeai",
+        "image-automatic1111": "automatic1111",
+    }.get(mode)
+
+
+def _shared_context(mode: str) -> tuple[bool, Optional[ChatContext]]:
+    api_type = _shared_api_type_for_mode(mode)
+    if not api_type:
+        return False, None
+    selection = get_shared_selection(api_type)
+    if selection is None:
+        return False, None
+
+    selected_ip = selection.get("ip")
+    try:
+        selected_port = int(selection.get("port"))
+    except (TypeError, ValueError):
+        return True, None
+
+    endpoint = None
+    for candidate in _load_endpoints(mode):
+        candidate_ip = _first_value(
+            candidate.get("ip") or candidate.get("api_host") or candidate.get("hostnames")
+        )
+        try:
+            candidate_port = int(candidate.get("port"))
+        except (TypeError, ValueError):
+            continue
+        if candidate_ip == selected_ip and candidate_port == selected_port:
+            endpoint = dict(candidate)
+            break
+    if endpoint is None:
+        return True, None
+
+    available_models = selection.get("available_models", [])
+    if isinstance(available_models, str):
+        available_models = _parse_models(available_models)
+    if not isinstance(available_models, list):
+        available_models = []
+    chat = ChatContext(
+        endpoint=endpoint,
+        mode=mode,
+        model=selection.get("model"),
+        available_models=available_models,
+    )
+    return True, chat if _context_is_available(chat) else None
+
+
 def _load_preferred_context(mode: str) -> Optional[ChatContext]:
     if not mode:
         return None
+
+    has_shared_selection, shared_context = _shared_context(mode)
+    if has_shared_selection:
+        return shared_context
 
     preferred = _preferences.get(mode, {})
     if not isinstance(preferred, dict):
@@ -556,6 +671,30 @@ def _load_endpoints(mode: str) -> List[dict]:
     return rows
 
 
+def _load_public_endpoints(mode: str, limit: int = 25) -> List[dict]:
+    endpoints = _load_endpoints(mode)
+    if mode != "llm-ollama":
+        return endpoints[:limit]
+
+    # Discord only presents 25 select options. Probe that same bounded set in
+    # parallel, rather than blocking a menu interaction on every historical
+    # scan result. A subsequent scan refreshes and reorders the candidate set.
+    candidates = endpoints[:limit]
+    if not candidates:
+        return []
+    with ThreadPoolExecutor(max_workers=len(candidates)) as executor:
+        probe_results = list(executor.map(probe_ollama_endpoint, candidates))
+    public = []
+    for endpoint, result in zip(candidates, probe_results):
+        if result.accessible:
+            endpoint = dict(endpoint)
+            endpoint["available_models"] = ";".join(result.chat_models)
+            public.append(endpoint)
+    return [
+        endpoint for endpoint in public
+    ]
+
+
 def _context_is_available(chat: ChatContext) -> bool:
     if not chat.endpoint:
         return False
@@ -564,6 +703,16 @@ def _context_is_available(chat: ChatContext) -> bool:
     port = _first_value(chat.endpoint.get("port"))
     if not host or not port:
         return False
+
+    # A context saved before the auth-aware selector was introduced can still
+    # point at a metadata-public but inference-protected server. Revalidate it
+    # before /chat or mention handling uses the saved selection.
+    if chat.mode == "llm-ollama":
+        probe = probe_ollama_endpoint(chat.endpoint)
+        if not probe.accessible:
+            return False
+        if chat.model and probe.chat_models and chat.model not in probe.chat_models:
+            return False
 
     endpoints = _load_endpoints(chat.mode)
     if not endpoints:
@@ -580,29 +729,13 @@ def _context_is_available(chat: ChatContext) -> bool:
 
 
 def _fetch_ollama_models(chat: ChatContext) -> List[str]:
-    """Fetch installed Ollama models from its native API."""
+    """Return only models verified as chat-accessible by the shared probe."""
 
-    base_url = chat.base_url
-    if not base_url:
+    result = probe_ollama_endpoint(chat.endpoint, force=True)
+    if not result.accessible:
+        chat.board_error = result.reason or result.status
         return []
-
-    try:
-        response = requests.get(f"{base_url}/api/tags", timeout=10)
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError):
-        return []
-
-    models: List[str] = []
-    for item in payload.get("models", []):
-        if isinstance(item, dict):
-            candidate = item.get("name") or item.get("model") or item.get("id")
-        else:
-            candidate = str(item)
-        if candidate:
-            models.append(str(candidate))
-
-    return [model for model in models if model]
+    return result.chat_models
 
 
 def _fetch_endpoint_models(chat: ChatContext) -> List[str]:
@@ -751,7 +884,7 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
     if not base_url:
         return "The selected server is missing connection details."
 
-    chat_paths = ["/api/chat", "/v1/chat/completions", "/chat"]
+    chat_paths = ["/api/chat", "/v1/chat/completions", "/v1/chat", "/chat"]
     _prune_chat_messages(chat)
     now = time.time()
     pending_message = {"role": "user", "content": prompt, "timestamp": now}
@@ -764,16 +897,25 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
         )
     payload = {"model": chat.model, "messages": payload_messages, "stream": False}
 
+    headers = endpoint_headers(chat.endpoint)
+
     last_error = ""
+    auth_failures = 0
+    saw_usable_route = False
     for path in chat_paths:
         try:
             resp = requests.post(
                 f"{base_url}{path}",
+                headers=headers,
                 json=payload,
                 timeout=(request_timeout, read_timeout),
             )
-            if resp.status_code == 404:
+            if resp.status_code in (404, 405):
                 continue
+            if resp.status_code in (401, 403):
+                auth_failures += 1
+                continue
+            saw_usable_route = True
             resp.raise_for_status()
             data = resp.json()
             content = _extract_chat_content(data)
@@ -786,10 +928,69 @@ def _send_chat_message(chat: ChatContext, prompt: str) -> str:
             )
             _prune_chat_messages(chat)
             return content
+        except requests.HTTPError as exc:  # pragma: no cover - network failures
+            response = exc.response
+            detail = ""
+            if response is not None:
+                try:
+                    error_payload = response.json()
+                    detail = str(error_payload.get("error", "")).strip()
+                except (ValueError, AttributeError):
+                    detail = response.text.strip()[:240]
+            last_error = detail or str(exc)
         except requests.RequestException as exc:  # pragma: no cover - network failures
             last_error = str(exc)
         except ValueError:
             last_error = "Invalid JSON response"
+
+    # Older Ollama-compatible servers expose only the native generate API.
+    # Fall back to it with a plain prompt when all chat-shaped APIs reject the
+    # request (commonly a 400 for an incompatible model/API combination).
+    history_prompt = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')}"
+        for message in payload_messages
+    )
+    for path, generate_payload in (
+        (
+            "/api/generate",
+            {"model": chat.model, "prompt": history_prompt, "stream": False},
+        ),
+        (
+            "/generate",
+            {"model": chat.model, "prompt": history_prompt, "stream": False},
+        ),
+    ):
+        try:
+            resp = requests.post(
+                f"{base_url}{path}",
+                headers=headers,
+                json=generate_payload,
+                timeout=(request_timeout, read_timeout),
+            )
+            if resp.status_code in (404, 405):
+                continue
+            if resp.status_code in (401, 403):
+                auth_failures += 1
+                continue
+            saw_usable_route = True
+            resp.raise_for_status()
+            content = _extract_chat_content(resp.json())
+            if content:
+                chat.messages.append(pending_message)
+                chat.messages.append(
+                    {"role": "assistant", "content": content, "timestamp": time.time()}
+                )
+                _prune_chat_messages(chat)
+                return content
+        except requests.RequestException as exc:  # pragma: no cover - network failures
+            last_error = str(exc)
+        except ValueError:
+            last_error = "Invalid JSON response"
+    if auth_failures and not saw_usable_route:
+        return (
+            "This server requires authentication. Select a public Ollama "
+            "server or add an API token to its endpoint configuration."
+        )
     return f"Failed to chat with the server. {last_error or 'No supported endpoints responded.'}"
 
 
@@ -827,7 +1028,7 @@ def _send_imagine_request(
     )
     port = _first_value(chat.endpoint.get("port"))
     if not host or not port:
-        return "Select an InvokeAI server with /borrowedcompute before sending prompts.", None
+        return "Select an InvokeAI server with /config before sending prompts.", None
 
     sanitized_width = max(64, min(width, 2048))
     sanitized_height = max(64, min(height, 2048))
@@ -850,7 +1051,7 @@ def _send_imagine_request(
 
     model = _resolve_invoke_model(client, chat.model)
     if not model:
-        return "Select a model with /borrowedcompute before sending image prompts.", None
+        return "Select a model with /config before sending image prompts.", None
 
     try:
         board_id = client.ensure_board(BORROWEDCOMPUTE_BOARD_NAME)
@@ -937,6 +1138,13 @@ def _send_automatic1111_request(
             timeout=REQUEST_TIMEOUT,
         )
     except (Automatic1111ClientError, requests.RequestException, ValueError) as exc:
+        LOGGER.error(
+            "Automatic1111 generation failed for %s:%s model=%s: %s",
+            host,
+            port,
+            chat.model,
+            exc,
+        )
         return f"Automatic1111 generation failed: {exc}", None
 
     image_path = result.get("path") if isinstance(result, dict) else None
@@ -1000,10 +1208,9 @@ class ProviderSelect(discord.ui.Select):
             return
 
         if not interaction.response.is_done():
-            defer_kwargs = {"ephemeral": True}
-            if option.get("script") == "shodanscan.py":
-                defer_kwargs["thinking"] = True
-            await interaction.response.defer(**defer_kwargs)
+            # This is a component interaction. Defer the existing menu
+            # response so the eventual edit does not create a new message.
+            await interaction.response.defer()
 
         message = await _handle_option(option, interaction)
         followup_view = discord.ui.View(timeout=300)
@@ -1045,10 +1252,8 @@ class EndpointSelect(discord.ui.Select):
         self.session.chat = chat
         self.session.log(f"{self.provider_label} -> {endpoint.get('id') or 'endpoint'}")
         self.session.endpoints = self.endpoints
-        _save_context(self.session.user_id, chat)
-        _update_preferences_from_chat(chat)
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
 
         fetched_models = await asyncio.to_thread(_fetch_endpoint_models, chat)
         if chat.board_error:
@@ -1062,13 +1267,8 @@ class EndpointSelect(discord.ui.Select):
                 chat.model = fetched_models[0]
             _save_context(self.session.user_id, chat)
             model_message = "Server selected. Pick a model and start chatting."
-        elif chat.available_models:
-            model_message = "Server selected. Using configured models for this server."
         else:
-            model_message = (
-                "Server selected, but no models are available yet. "
-                "Use **Refresh models** after the server finishes loading."
-            )
+            model_message = "That server has no verified chat models. Choose another server."
 
         if chat.board_notice:
             model_message = f"{chat.board_notice}\n{model_message}"
@@ -1158,7 +1358,7 @@ class RefreshModelsButton(discord.ui.Button):
             await _update_menu_message(interaction, content, ChatView(self.session))
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         models = await asyncio.to_thread(_fetch_endpoint_models, chat)
         if chat.board_error:
             content = _compose_content(chat.board_error, self.session, chat)
@@ -1195,7 +1395,7 @@ class ChangeServerButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
         if not self.session.endpoints:
             content = _compose_content(
-                "No server list available. Pick a menu again with /borrowedcompute.",
+                "No server list available. Pick a server again with /config.",
                 self.session,
                 self.session.chat,
             )
@@ -1220,6 +1420,19 @@ class ChangeServerButton(discord.ui.Button):
         await _update_menu_message(interaction, content, view)
 
 
+class BackToConfigButton(discord.ui.Button):
+    def __init__(self, session: MenuSession):
+        super().__init__(label="Back to config", style=discord.ButtonStyle.secondary)
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        await _update_menu_message(
+            interaction,
+            _compose_content("Choose a configuration category:", self.session),
+            ConfigureView(self.session),
+        )
+
+
 class ChatView(discord.ui.View):
     def __init__(self, session: MenuSession):
         super().__init__(timeout=300)
@@ -1229,6 +1442,7 @@ class ChatView(discord.ui.View):
             self.add_item(ModelSelect(session))
         self.add_item(RefreshModelsButton(session))
         self.add_item(ChangeServerButton(session))
+        self.add_item(BackToConfigButton(session))
 
 
 @app_commands.command(name="chat", description="Send a prompt to your selected Ollama server")
@@ -1239,15 +1453,18 @@ async def chat_command(interaction: discord.Interaction, prompt: str) -> None:
         await interaction.response.send_message("Prompt cannot be empty.")
         return
 
+    # Context validation may run the shared Ollama compatibility probe. Ack
+    # the slash command before doing that work so Discord's short interaction
+    # window cannot expire.
+    await interaction.response.defer(thinking=True)
     session = _get_session(interaction.user.id)
     chat = _get_context(interaction.user.id, "llm-ollama")
     if not chat or not chat.model:
-        await interaction.response.send_message(
-            "Select a chat server and model with /borrowedcompute first."
+        await interaction.edit_original_response(
+            content="Select a chat server and model with /config first."
         )
         return
 
-    await interaction.response.defer(thinking=True)
     session.log(f"Chat prompt -> {chat.model}")
     reply = await asyncio.to_thread(_send_chat_message, chat, prompt_text)
     _save_context(interaction.user.id, chat)
@@ -1279,6 +1496,7 @@ async def imagine_command(
         await interaction.response.send_message("Prompt cannot be empty.")
         return
 
+    await interaction.response.defer(thinking=True)
     session = _get_session(interaction.user.id)
     chat = session.chat if session.chat and session.chat.mode.startswith("image-") else None
     if chat is None:
@@ -1286,12 +1504,11 @@ async def imagine_command(
     if chat is None:
         chat = _get_context(interaction.user.id, "image-automatic1111")
     if not chat or not chat.model:
-        await interaction.response.send_message(
-            "Select an image server and model with /borrowedcompute before calling /imagine."
+        await interaction.edit_original_response(
+            content="Select an image server and model with /config before calling /imagine."
         )
         return
 
-    await interaction.response.defer(thinking=True)
     session.log(f"Imagine prompt -> {chat.model}")
     message, image_path = await asyncio.to_thread(
         _send_imagine_request,
@@ -1329,10 +1546,12 @@ async def _reply_to_mention(
         return
 
     session = _get_session(message.author.id)
-    chat = _get_context(message.author.id, "llm-ollama")
+    chat = session.chat if session.chat and session.chat.mode == "llm-ollama" else None
+    if chat is None:
+        chat = _get_context(message.author.id, "llm-ollama")
     if not chat or not chat.model:
         await message.reply(
-            "Select a chat server and model with /borrowedcompute first.",
+            "Select a chat server and model with /config first.",
             mention_author=False,
         )
         return
@@ -1355,7 +1574,9 @@ async def _show_endpoint_menu(
 ) -> None:
     """Show the server selector for a direct Chat or Imagine menu action."""
 
-    endpoints = _load_endpoints(mode)
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+    endpoints = await asyncio.to_thread(_load_public_endpoints, mode)
     session.mode = mode
     session.endpoints = endpoints
     session.provider_label = provider_label
@@ -1365,6 +1586,7 @@ async def _show_endpoint_menu(
     if endpoints:
         view = discord.ui.View(timeout=300)
         view.add_item(EndpointSelect(provider_label, endpoints, mode, session))
+        view.add_item(BackToConfigButton(session))
         content = _compose_content(
             f"Select a server for **{provider_label}**:", session
         )
@@ -1380,14 +1602,13 @@ async def _show_endpoint_menu(
 
 
 class ConfigureSelect(discord.ui.Select):
-    """Discord equivalent of BorrowedCompute's direct Configure menu."""
+    """Top-level Discord configuration categories."""
 
     def __init__(self, session: MenuSession):
         options = [
-            discord.SelectOption(label="Scan all servers", value="scan"),
-            discord.SelectOption(label="Configure chat", value="chat"),
-            discord.SelectOption(label="Configure image generation", value="image"),
-            discord.SelectOption(label="[Back]", value="back"),
+            discord.SelectOption(label="Shodan", value="shodan"),
+            discord.SelectOption(label="Chat", value="chat"),
+            discord.SelectOption(label="Imagine", value="imagine"),
         ]
         super().__init__(
             placeholder="Choose a configuration action",
@@ -1400,35 +1621,20 @@ class ConfigureSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
         action = self.values[0]
 
-        if action == "back":
-            self.session.log("Configure -> Back")
-            await _update_menu_message(
-                interaction,
-                _compose_content("Pick a menu to get started.", self.session),
-                TopMenuView(self.session),
-            )
-            return
-
         if action == "chat":
             self.session.log("Configure -> Chat")
-            await _update_menu_message(
-                interaction,
-                _compose_content("Configure chat:", self.session),
-                ConfigureChatView(self.session),
+            await _show_endpoint_menu(interaction, self.session, "Ollama", "llm-ollama")
+            return
+        if action == "imagine":
+            self.session.log("Configure -> Imagine")
+            await interaction.response.edit_message(
+                content=_compose_content("Choose an image provider:", self.session),
+                view=ImagineProviderView(self.session),
             )
             return
 
-        if action == "image":
-            self.session.log("Configure -> Image Generation")
-            await _update_menu_message(
-                interaction,
-                _compose_content("Configure image generation:", self.session),
-                ConfigureImageView(self.session),
-            )
-            return
-
-        self.session.log("Configure -> Scan all servers")
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.session.log("Configure -> Shodan")
+        await interaction.response.defer()
         scan_option = {"script": "shodanscan.py", "extra_args": []}
         result = await _run_shodan_scan(scan_option, interaction)
         content = _compose_content(_trim_discord_message(result), self.session)
@@ -1436,6 +1642,39 @@ class ConfigureSelect(discord.ui.Select):
             content=content,
             view=ConfigureView(self.session),
         )
+
+
+class ImagineProviderSelect(discord.ui.Select):
+    def __init__(self, session: MenuSession):
+        super().__init__(
+            placeholder="Choose an image provider",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="InvokeAI", value="invokeai"),
+                discord.SelectOption(label="Automatic1111", value="automatic1111"),
+            ],
+        )
+        self.session = session
+
+    async def callback(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        action = self.values[0]
+        if action == "invokeai":
+            await _show_endpoint_menu(
+                interaction, self.session, "InvokeAI", "image-invokeai"
+            )
+            return
+        await _show_endpoint_menu(
+            interaction, self.session, "Automatic1111", "image-automatic1111"
+        )
+
+
+class ImagineProviderView(discord.ui.View):
+    def __init__(self, session: MenuSession):
+        super().__init__(timeout=300)
+        self.session = session
+        self.add_item(ImagineProviderSelect(session))
+        self.add_item(BackToConfigButton(session))
 
 
 class ConfigureView(discord.ui.View):
@@ -1550,7 +1789,7 @@ class TopMenuView(discord.ui.View):
 
         if key == "exit":
             await _update_menu_message(
-                interaction, "Session closed. Use /borrowedcompute to start again.", None
+                interaction, "Session closed. Use /config to start again.", None
             )
             return
 
@@ -1609,7 +1848,18 @@ class BorrowedComputeDiscord(commands.Bot):
             return
 
         if self.user and any(mention.id == self.user.id for mention in message.mentions):
+            # Discord can deliver the same gateway event more than once while
+            # reconnecting. A mention must never produce two replies.
+            message_id = getattr(message, "id", None)
+            if message_id is not None:
+                if message_id in _processed_mention_ids:
+                    return
+                _processed_mention_ids.add(message_id)
+                if len(_processed_mention_ids) > 4096:
+                    _processed_mention_ids.clear()
+                    _processed_mention_ids.add(message_id)
             await _reply_to_mention(message, self.user)
+            return
 
         await super().on_message(message)
 
@@ -1617,12 +1867,16 @@ class BorrowedComputeDiscord(commands.Bot):
 bot = BorrowedComputeDiscord()
 
 
-@app_commands.command(name="borrowedcompute", description="Open the BorrowedCompute menu in Discord")
+@app_commands.command(name="config", description="Configure Discord server and model selections")
 async def start_menu(interaction: discord.Interaction) -> None:
+    # A command must be acknowledged within Discord's short interaction
+    # window. Build/persist the session after acknowledging it, then edit that
+    # same ephemeral response instead of sending a second dismissible message.
+    await interaction.response.defer(ephemeral=True)
     session = _reset_session(interaction.user.id)
-    view = TopMenuView(session)
-    await interaction.response.send_message(
-        "Pick a menu to get started.", view=view, ephemeral=True
+    view = ConfigureView(session)
+    await interaction.edit_original_response(
+        content="Configure BorrowedCompute:", view=view
     )
 
 
@@ -1637,4 +1891,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _acquire_instance_lock()
     main()

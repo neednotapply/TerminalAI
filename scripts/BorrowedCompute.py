@@ -34,6 +34,7 @@ from automatic1111_client import (
     Automatic1111ClientError,
     Automatic1111Model,
 )
+from ollama_compat import probe_ollama_endpoint
 
 try:
     import chafa
@@ -432,6 +433,43 @@ def _save_menu_state() -> None:
             json.dump(payload, fh, indent=2, sort_keys=True)
     except OSError:
         return
+
+
+def get_shared_selection(api_type: str) -> Optional[Dict[str, Any]]:
+    """Reload and return the cross-surface server/model selection."""
+
+    _load_menu_state()
+    entry = MENU_STATE.get(api_type)
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def save_shared_selection(
+    api_type: str,
+    endpoint: Dict[str, Any],
+    model: Optional[str] = None,
+    model_key: Optional[str] = None,
+) -> None:
+    """Persist a server/model selection for both the TUI and Discord."""
+
+    _load_menu_state()
+    ip = endpoint.get("ip") or endpoint.get("api_host") or endpoint.get("hostnames")
+    port = endpoint.get("port")
+    if not isinstance(ip, str) or not ip.strip():
+        return
+    try:
+        numeric_port = int(port)
+    except (TypeError, ValueError):
+        return
+
+    entry = dict(MENU_STATE.get(api_type) or {})
+    entry["ip"] = ip.strip()
+    entry["port"] = numeric_port
+    if isinstance(model, str) and model.strip():
+        entry["model"] = model.strip()
+    if isinstance(model_key, str) and model_key.strip():
+        entry["model_key"] = model_key.strip()
+    MENU_STATE[api_type] = entry
+    _save_menu_state()
 
 
 def _remember_server_selection(api_type: str, server: Dict[str, Any]) -> None:
@@ -3112,6 +3150,22 @@ def load_servers(api_type=None):
         df = df[df["is_active"]]
         if df.empty:
             continue
+        if api == "ollama":
+            rows = [row.to_dict() for _, row in df.iterrows()]
+
+            def _probe_row(row):
+                return row, probe_ollama_endpoint(row)
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                probed = list(executor.map(_probe_row, rows))
+            eligible_rows = []
+            for row, result in probed:
+                if result.accessible:
+                    row["verified_chat_models"] = ";".join(result.chat_models)
+                    eligible_rows.append(row)
+            df = pd.DataFrame(eligible_rows)
+            if df.empty:
+                continue
         df = df.sort_values("ping")
         grouped = df.groupby("ip", sort=False)
         for ip, group in grouped:
@@ -3141,6 +3195,14 @@ def load_servers(api_type=None):
                     "country": country,
                     "ping": ping_val,
                     "api_type": api,
+                    "verified_models": sorted(
+                        {
+                            model.strip()
+                            for value in group.get("verified_chat_models", [])
+                            for model in str(value).split(";")
+                            if model.strip()
+                        }
+                    ) if api == "ollama" else [],
                 }
             )
     return servers
@@ -3283,18 +3345,11 @@ def ping_time(ip, port):
 
 def check_ollama_api(ip, port, *, api_host=None, scheme="http"):
     """Verify the Ollama API responds on the host and port."""
-    try:
-        host = api_host or ip
-        r = requests.get(
-            f"{scheme}://{host}:{port}/api/tags",
-            timeout=5,
-        )
-        r.raise_for_status()
-        payload = r.json()
-        models = payload.get("models") if isinstance(payload, dict) else None
-        return isinstance(models, list) and bool(models)
-    except (requests.RequestException, ValueError):
-        return False
+    result = probe_ollama_endpoint(
+        {"scheme": scheme, "api_host": api_host or ip, "port": port},
+        force=True,
+    )
+    return result.accessible
 
 
 def check_invoke_api(ip, port, *, api_host=None, scheme="http"):
@@ -3613,6 +3668,24 @@ def select_sampler_option(options: List[str], default_value: str) -> Optional[st
 
 
 def fetch_models():
+    if selected_api == "ollama" and selected_server:
+        connection = selected_server.get("connections", {}).get("ollama", {})
+        result = probe_ollama_endpoint(
+            {
+                "scheme": connection.get("scheme", "http"),
+                "api_host": connection.get("host", selected_server.get("ip")),
+                "ip": selected_server.get("ip"),
+                "port": selected_server.get("apis", {}).get("ollama"),
+            }
+        )
+        if not result.accessible:
+            print(
+                f"{RED}Ollama server is not chat-accessible: "
+                f"{result.reason or result.status}{RESET}"
+            )
+            return []
+        return result.chat_models
+
     models: List[str] = []
     primary_error: Optional[Exception] = None
 

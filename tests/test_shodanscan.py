@@ -89,6 +89,8 @@ def test_find_new_automatic1111_persists_models(tmp_path, monkeypatch):
 
 def test_check_ollama_api_returns_working_hostname_and_scheme(monkeypatch):
     class FakeResponse:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -104,6 +106,17 @@ def test_check_ollama_api_returns_working_hostname_and_scheme(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr(shodanscan.requests, "get", fake_get)
+    class ChatResponse:
+        status_code = 200
+
+        def json(self):
+            return {"message": {"content": "OK"}}
+
+    monkeypatch.setattr(
+        shodanscan.requests,
+        "post",
+        lambda url, **kwargs: ChatResponse(),
+    )
 
     ok, reason, models, connection = shodanscan.check_ollama_api(
         "1.2.3.4", 443, hostname="ollama.example.com", return_connection=True

@@ -1,5 +1,6 @@
 import json
 import asyncio
+import requests
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,19 +75,132 @@ def test_extract_chat_content_supports_native_ollama_response():
     assert discord_bot._extract_chat_content(payload) == "Native reply"
 
 
-def test_configure_image_menu_lists_both_providers():
+def test_send_chat_message_falls_back_to_native_generate_api(monkeypatch):
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = str(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(response=self)
+
+    def fake_post(url, **kwargs):
+        if url.endswith("/api/generate"):
+            return Response(200, {"response": "native reply"})
+        return Response(400, {"error": "chat endpoint rejected model"})
+
+    monkeypatch.setattr(discord_bot.requests, "post", fake_post)
+    chat = discord_bot.ChatContext(
+        endpoint={"ip": "1.1.1.1", "port": "11434"},
+        mode="llm-ollama",
+        model="model:latest",
+    )
+
+    assert discord_bot._send_chat_message(chat, "hello") == "native reply"
+    assert chat.messages[-1]["content"] == "native reply"
+
+
+def test_send_chat_message_reports_authentication_required(monkeypatch):
+    class Response:
+        status_code = 401
+
+    monkeypatch.setattr(discord_bot.requests, "post", lambda *args, **kwargs: Response())
+    chat = discord_bot.ChatContext(
+        endpoint={"ip": "1.1.1.1", "port": "11434"},
+        mode="llm-ollama",
+        model="model:latest",
+    )
+
+    result = discord_bot._send_chat_message(chat, "hello")
+
+    assert "requires authentication" in result
+
+
+def test_send_chat_message_uses_public_route_after_auth_route_fails(monkeypatch):
+    class Response:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.text = str(self._payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(response=self)
+
+    def fake_post(url, **kwargs):
+        if url.endswith("/api/chat"):
+            return Response(401)
+        if url.endswith("/v1/chat"):
+            return Response(200, {"message": {"content": "public route reply"}})
+        return Response(404)
+
+    monkeypatch.setattr(discord_bot.requests, "post", fake_post)
+    chat = discord_bot.ChatContext(
+        endpoint={"ip": "1.1.1.1", "port": "11434"},
+        mode="llm-ollama",
+        model="model:latest",
+    )
+
+    assert discord_bot._send_chat_message(chat, "hello") == "public route reply"
+
+
+def test_public_endpoint_loader_excludes_authenticated_ollama_servers(monkeypatch):
+    public = {"id": "public", "ip": "1.1.1.1", "port": "11434"}
+    protected = {"id": "protected", "ip": "2.2.2.2", "port": "11434"}
+    monkeypatch.setattr(discord_bot, "_load_endpoints", lambda mode: [public, protected])
+    monkeypatch.setattr(
+        discord_bot,
+        "probe_ollama_endpoint",
+        lambda endpoint: discord_bot.OllamaProbeResult(
+            "requires_auth" if endpoint["id"] == "protected" else "accessible",
+            chat_models=["llama3"] if endpoint["id"] == "public" else [],
+        ),
+    )
+
+    assert discord_bot._load_public_endpoints("llm-ollama") == [
+        {**public, "available_models": "llama3"}
+    ]
+
+
+def test_discord_loads_shared_tui_selection_before_legacy_preferences(monkeypatch):
+    endpoint = {"id": "tui-server", "ip": "1.1.1.1", "port": "11434"}
+    monkeypatch.setattr(
+        discord_bot,
+        "get_shared_selection",
+        lambda api_type: {"ip": "1.1.1.1", "port": 11434, "model": "llama3"},
+    )
+    monkeypatch.setattr(discord_bot, "_load_endpoints", lambda mode: [endpoint])
+    monkeypatch.setattr(discord_bot, "_context_is_available", lambda chat: True)
+
+    restored = discord_bot._load_preferred_context("llm-ollama")
+
+    assert restored is not None
+    assert restored.endpoint["id"] == "tui-server"
+    assert restored.model == "llama3"
+
+
+def test_config_menu_lists_three_categories():
     session = discord_bot.MenuSession(user_id=123)
-    select = discord_bot.ConfigureImageSelect(session)
+    select = discord_bot.ConfigureSelect(session)
 
     assert [option.label for option in select.options] == [
-        "InvokeAI",
-        "Automatic1111",
-        "[Back]",
+        "Shodan",
+        "Chat",
+        "Imagine",
     ]
 
 
 def _reset_discord_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(discord_bot, "SESSIONS_PATH", tmp_path / "discord_sessions.json")
+    monkeypatch.setattr(discord_bot, "save_shared_selection", lambda *args, **kwargs: None)
     discord_bot._persisted_state = {"contexts": {}, "sessions": {}}
     discord_bot._active_contexts = {}
     discord_bot._sessions = {}
@@ -128,6 +242,13 @@ def test_context_persistence_across_restarts(monkeypatch, tmp_path):
         discord_bot,
         "_load_endpoints",
         lambda mode: [{"ip": "1.1.1.1", "port": "8000", "id": "server"}],
+    )
+    monkeypatch.setattr(
+        discord_bot,
+        "probe_ollama_endpoint",
+        lambda endpoint: discord_bot.OllamaProbeResult(
+            "accessible", chat_models=["llama3"]
+        ),
     )
 
     chat = discord_bot.ChatContext(
